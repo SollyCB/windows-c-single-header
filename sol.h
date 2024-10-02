@@ -38,7 +38,11 @@ typedef uint64_t u64;
 #define popcnt32(x) __popcnt32(x)
 #define popcnt16(x) __popcnt16(x)
 
+#define typeof(x) __typeof__(x)
 #define maxif(x) (0UL - (bool)(x))
+
+#define memb_to_struct(memb, memb_of, memb_name) \
+((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
 
 #define fmt_error(buf, size, err) \
 do { \
@@ -52,6 +56,16 @@ fmt_error(m__buf, sizeof(m__buf), GetLastError()); \
 printf("%s\n", m__buf); \
 } while(0);
 
+enum type {
+    TYPE_LINEAR,
+    TYPE_ARENA,
+};
+
+static inline uint64 align(uint64 size, uint64 alignment) {
+    const uint64 alignment_mask = alignment - 1;
+    return (size + alignment_mask) & ~alignment_mask;
+}
+
 // file.h
 void write_stdout(char *buf, u64 size);
 
@@ -59,19 +73,19 @@ u64 write_file(char *uri, void *buf, u64 size);
 u64 read_file(char *uri, void *buf, u64 size);
 
 // print.h
-int scb_snprintf(char *buf, int len, const char *fmt, ...);
+u32 scb_snprintf(char *buf, u32 len, const char *fmt, ...);
 
 #define print(fmt, ...) \
 do { \
 char m__buf[2046]; \
-int m__len = scb_snprintf(m__buf, sizeof(m__buf), fmt, __VA_ARGS__); \
+u32 m__len = scb_snprintf(m__buf, sizeof(m__buf), fmt, __VA_ARGS__); \
 write_stdout(m__buf, m__len); \
 } while(0);
 
 #define println(fmt, ...) \
 do { \
 char m__buf[2046]; \
-int m__len = scb_snprintf(m__buf, sizeof(m__buf), fmt, __VA_ARGS__); \
+u32 m__len = scb_snprintf(m__buf, sizeof(m__buf), fmt, __VA_ARGS__); \
 m__buf[m__len++] = '\n'; \
 write_stdout(m__buf, m__len); \
 } while(0);
@@ -98,7 +112,14 @@ log_break; \
 } \
 } while(0);
 
-#define log_err(prec, ...) \
+#define log_error(...) \
+do { \
+print("[%s, %s, %u%] %s : ERROR ", __FILE__, __FUNCTION__, __LINE__); \
+println(__VA_ARGS__); \
+log_break; \
+} while(0);
+
+#define log_system_error(...) \
 do { \
 print("[%s, %s, %u%] ", __FILE__, __FUNCTION__, __LINE__); \
 char m__buf[512]; \
@@ -107,6 +128,153 @@ fmt_error(m__buf, sizeof(m__buf), GetLastError()); \
 println(" : %s", buf); \
 log_break; \
 } while(0);
+
+#define invalid_default_case log_error("invalid default case")
+
+// list.h
+struct list {
+    struct list *next;
+    struct list *prev;
+};
+
+static inline void init_list(struct list *list)
+{
+    list->next = list;
+    list->prev = list;
+}
+
+static inline bool list_is_empty(struct list *list)
+{
+    return list->next == NULL;
+}
+
+static inline void list_add_head(struct list *list, struct list *new_memb)
+{
+    struct list *next = list->next;
+    next->prev = new_memb;
+    list->next = new_memb;
+    new_memb->prev = list;
+    new_memb->next = next;
+    if (list->prev == list)
+        list->prev = new_memb;
+}
+
+static inline void list_add_tail(struct list *list, struct list *new_memb)
+{
+    struct list *prev = list->prev;
+    prev->next = new_memb;
+    list->prev = new_memb;
+    new_memb->next = list;
+    new_memb->prev = prev;
+    if (list->next == list)
+        list->next = new_memb;
+}
+
+static inline bool list_remove(struct list *list)
+{
+    if (list->next == list->prev)
+        return false;
+    
+    struct list *next = list->next;
+    struct list *prev = list->prev;
+    next->prev = prev;
+    prev->next = next;
+    
+    return true;
+}
+
+#define list_for_each(it, head, memb_name) \
+for(it = memb_to_struct((head)->next, it, memb_name); \
+&it->memb_name != head; \
+it = memb_to_struct(it->memb_name.next, it, memb_name))
+
+#define list_for_each_rev(it, head, memb_name) \
+for(it = memb_to_struct((head)->prev, it, memb_name); \
+&it->memb_name != head; \
+it = memb_to_struct(it->memb_name.prev, it, memb_name))
+
+#define list_for_each_safe(it, tmp, head, memb_name) \
+for(it = memb_to_struct((head)->next, it, memb_name), tmp = it; \
+it = tmp, &it->memb_name != head; \
+it = memb_to_struct(it->memb_name.next, it, memb_name), tmp = it)
+
+#define list_for_each_rev_safe(it, tmp, head, memb_name) \
+for(it = memb_to_struct((head)->prev, it, memb_name), tmp = it; \
+it = tmp, &it->memb_name != head; \
+it = memb_to_struct(it->memb_name.prev, it, memb_name), tmp = it)
+
+// alloc.h
+typedef struct allocator allocator_t;
+typedef struct arena arena_t;
+typedef struct linear linear_t;
+
+#define def_allocate_fn(name) void *name(allocator_t *alloc, u64 size)
+#define def_reallocate_fn(name) void *name(allocator_t *alloc, void *p, u64 old_size, u64 new_size)
+#define def_deallocate_fn(name) void name(allocator_t *alloc, void *p)
+
+struct linear {
+    u64 cap;
+    u64 used;
+    u8 *data;
+};
+
+struct arena_block {
+    struct linear linear;
+    struct list list;
+};
+
+struct arena {
+    u32 block_count;
+    u32 min_block_size;
+    struct list block_list;
+};
+
+struct allocator {
+    enum type type;
+    union {
+        arena_t arena;
+        linear_t linear;
+    };
+};
+
+#define alloc_align(size) align(size, 16)
+
+def_allocate_fn(allocate_linear);
+def_reallocate_fn(reallocate_linear);
+def_deallocate_fn(deallocate_linear);
+
+def_allocate_fn(allocate_arena);
+def_reallocate_fn(reallocate_arena);
+def_deallocate_fn(deallocate_arena);
+
+def_allocate_fn(allocate) {
+    switch(alloc->type) {
+        case TYPE_LINEAR: return allocate_linear(alloc, size);
+        case TYPE_ARENA: return allocate_arena(alloc, size);
+        default:
+        invalid_default_case;
+    }
+    return NULL;
+}
+
+def_reallocate_fn(reallocate) {
+    switch(alloc->type) {
+        case TYPE_LINEAR: return reallocate_linear(alloc, p, old_size, new_size);
+        case TYPE_ARENA: return reallocate_arena(alloc, p, old_size, new_size);
+        default:
+        invalid_default_case;
+    }
+    return NULL;
+}
+
+def_deallocate_fn(deallocate) {
+    switch(alloc->type) {
+        case TYPE_LINEAR: deallocate_linear(alloc, p);
+        case TYPE_ARENA: deallocate_arena(alloc, p);
+        default:
+        invalid_default_case;
+    }
+}
 
 #ifdef SOL_DEF
 
@@ -129,12 +297,12 @@ u64 write_file(char *uri, void *buf, u64 size)
     HANDLE fd = CreateFile(uri, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (fd != INVALID_HANDLE_VALUE) {
-        log_err("failed to open file %s", uri);
+        log_system_error("failed to open file %s", uri);
         goto out;
     }
     BOOL success = WriteFile(fd, buf, size, &res, NULL);
     if (!success) {
-        log_err("failed to write file %s", uri);
+        log_system_error("failed to write file %s", uri);
         goto out;
     }
     out:
@@ -148,12 +316,12 @@ u64 read_file(char *uri, void *buf, u64 size)
     HANDLE fd = CreateFile(uri, GENERIC_READ, 0, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (fd != INVALID_HANDLE_VALUE) {
-        log_err("failed to open file %s", uri);
+        log_system_error("failed to open file %s", uri);
         goto out;
     }
     BOOL success = ReadFile(fd, buf, size, &res, NULL);
     if (!success) {
-        log_err("failed to read file %s", uri);
+        log_system_error("failed to read file %s", uri);
         goto out;
     }
     out:
@@ -173,10 +341,10 @@ enum {
     PR_Z = 0x80,
 };
 
-static int pr_parse_u(char *buf, u64 x, int f)
+static u32 pr_parse_u(char *buf, u64 x, u32 f)
 {
-    int bp = 0;
-    int zc = 0;
+    u32 bp = 0;
+    u32 zc = 0;
     char tmp[128];
     
     if (f & PR_Z) {
@@ -186,7 +354,7 @@ static int pr_parse_u(char *buf, u64 x, int f)
     }
     if (f & PR_H) {
         while(x > 0) {
-            int b = x & 0xf;
+            u32 b = x & 0xf;
             if (b > 9)
                 tmp[bp++] = 'a' + (b - 10);
             else
@@ -210,14 +378,14 @@ static int pr_parse_u(char *buf, u64 x, int f)
         tmp[bp++] = f & PR_H ? 'x' : 'b';
         tmp[bp++] = '0';
     }
-    for(int i=0; i < bp; ++i)
+    for(u32 i=0; i < bp; ++i)
         buf[i] = tmp[bp-1-i];
     return bp;
 }
 
-static int pr_parse_i(char *buf, s64 x, int f)
+static u32 pr_parse_i(char *buf, s64 x, u32 f)
 {
-    int bp = 0;
+    u32 bp = 0;
     if (x < 0) {
         buf[bp++] = '-';
         x *= -1;
@@ -226,21 +394,21 @@ static int pr_parse_i(char *buf, s64 x, int f)
     return bp;
 }
 
-static int pr_parse_s(char *buf, char *x, int f)
+static u32 pr_parse_s(char *buf, char *x, u32 f)
 {
-    int bp = strlen(x);
+    u32 bp = strlen(x);
     memcpy(buf, x, bp);
     return bp;
 }
 
-static int pr_parse_f(char *buf, double x, int f)
+static u32 pr_parse_f(char *buf, double x, u32 f)
 {
     // TODO(SollyCB): Idk if I will ever get round to implementing this myself...
-    int bp = sprintf(buf, "%f", x);
+    u32 bp = sprintf(buf, "%f", x);
     return bp;
 }
 
-static int pr_parse_c(char *buf, char x, int f)
+static u32 pr_parse_c(char *buf, char x, u32 f)
 {
     buf[0] = x;
     return 1;
@@ -263,15 +431,15 @@ static inline bool pr_is_ident(char c)
     }
 }
 
-int scb_snprintf(char *buf, int len, const char *fmt, ...)
+u32 scb_snprintf(char *buf, u32 len, const char *fmt, ...)
 {
     va_list va;
     va_start(va, fmt);
-    int f = 0;
-    int bp = 0;
-    int sl = strlen(fmt);
+    u32 f = 0;
+    u32 bp = 0;
+    u32 sl = strlen(fmt);
     
-    for(int i=0; i < sl; ++i) {
+    for(u32 i=0; i < sl; ++i) {
         f = 0;
         switch(fmt[i]) {
             case '-': {
@@ -318,6 +486,47 @@ int scb_snprintf(char *buf, int len, const char *fmt, ...)
     va_end(va);
     buf[bp++] = 0;
     return bp;
+}
+
+// alloc.c
+def_allocate_fn(allocate_linear)
+{
+    size = alloc_align(size);
+    if (alloc->linear.used + size > alloc->linear.cap)
+        return NULL;
+    
+    alloc->linear.used += size;
+    return alloc->linear.data + alloc->linear.used - alloc_align(size);
+}
+
+def_reallocate_fn(reallocate_linear)
+{
+    if (p == alloc->linear.data + alloc->linear.used - alloc_align(old_size)) {
+        alloc->linear.used -= alloc_align(old_size);
+        alloc->linear.used += alloc_align(new_size);
+        return alloc->linear.data + alloc->linear.used - alloc_align(new_size);
+    }
+    
+    if (new_size < old_size)
+        return p;
+    
+    void *ret = allocate_linear(alloc, new_size);
+    memcpy(ret, p, old_size);
+    return ret;
+}
+
+def_deallocate_fn(deallocate_linear) {}
+
+def_allocate_fn(allocate_arena)
+{
+}
+
+def_reallocate_fn(reallocate_arena)
+{
+}
+
+def_deallocate_fn(deallocate_arena)
+{
 }
 
 #endif // SOL_DEF
