@@ -9,7 +9,7 @@ struct thing {
 int main() {
     
     struct list list;
-    init_list(&list);
+    create_list(&list);
     
     struct thing a = {1};
     struct thing b = {2};
@@ -22,27 +22,15 @@ int main() {
     list_add_tail(&list, &d.l);
     
     struct thing *it;
-    list_for_each(it, &list, l) {
+    u32 count = 4;
+    list_for(it, &list, l, count) {
         println("%i", it->x);
     }
     
-    list_for_each_rev(it, &list, l) {
+    count = 4;
+    list_for_rev(it, &list, l, count) {
         println("%i", it->x);
     }
-    
-    struct thing *tmp;
-    
-#if 1
-    list_for_each_rev_safe(it, tmp, &list, l) {
-        println("%u", it->x);
-        list_remove(&it->l);
-    }
-#else
-    list_for_each(it, &list, l) {
-        println("%u", it->x);
-        list_remove(&it->l);
-    }
-#endif
     
     return 0;
 }

@@ -40,6 +40,7 @@ typedef uint64_t u64;
 
 #define typeof(x) __typeof__(x)
 #define maxif(x) (0UL - (bool)(x))
+#define cl_align(x) __declspec(align(x))
 
 #define memb_to_struct(memb, memb_of, memb_name) \
 ((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
@@ -61,9 +62,49 @@ enum type {
     TYPE_ARENA,
 };
 
-static inline uint64 align(uint64 size, uint64 alignment) {
-    const uint64 alignment_mask = alignment - 1;
+static inline u64 align(u64 size, u64 alignment) {
+    const u64 alignment_mask = alignment - 1;
     return (size + alignment_mask) & ~alignment_mask;
+}
+
+// os.h
+extern struct os {
+    u32 page_size;
+} os;
+
+#define def_os_init(name) void name(void)
+def_os_init(os_init);
+
+#define def_os_error_string(name) void name(char *buf, u32 len)
+def_os_error_string(os_error_string);
+
+#define def_os_alloc(name) void* name(u64 size)
+def_os_alloc(os_alloc);
+
+#define def_os_free(name) void name(void *p, u64 size)
+def_os_free(os_free);
+
+// rc.h
+typedef struct rc rc_t;
+
+struct rc {
+    u32 count;
+};
+
+static inline void rc_init(rc_t *rc)
+{
+    memset(rc, 0, sizeof(*rc));
+}
+
+static inline void rc_inc(rc_t *rc)
+{
+    rc->count += 1;
+}
+
+static inline bool rc_dec(rc_t *rc)
+{
+    rc->count -= rc->count > 0;
+    return rc->count;
 }
 
 // file.h
@@ -103,54 +144,53 @@ _mm_sfence(); \
 __debugbreak(); \
 } while(0);
 
-#define log_if(prec, ...) \
-do { \
-if ((prec)) { \
-print("[%s, %s, %u%] %s : ", __FILE__, __FUNCTION__, __LINE__, #prec); \
-println(__VA_ARGS__); \
-log_break; \
-} \
-} while(0);
-
 #define log_error(...) \
 do { \
-print("[%s, %s, %u%] %s : ERROR ", __FILE__, __FUNCTION__, __LINE__); \
+print("[%s, %s, %u%] LOG ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
 println(__VA_ARGS__); \
 log_break; \
 } while(0);
 
-#define log_system_error(...) \
+#define log_error_if(prec, ...) \
+do { if (prec) log_error(__VA_ARGS__); } while(0);
+
+#define log_os_error(...) \
 do { \
-print("[%s, %s, %u%] ", __FILE__, __FUNCTION__, __LINE__); \
+print("[%s, %s, %u%] LOG OS ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
 char m__buf[512]; \
 print(__VA_ARGS__); \
 fmt_error(m__buf, sizeof(m__buf), GetLastError()); \
-println(" : %s", buf); \
+println(" : %s", m__buf); \
 log_break; \
 } while(0);
+
+#define log_os_error_if(prec, ...) \
+do { if (prec) log_os_error(__VA_ARGS__); } while(0);
 
 #define invalid_default_case log_error("invalid default case")
 
 // list.h
+typedef struct list list_t;
+
 struct list {
     struct list *next;
     struct list *prev;
 };
 
-static inline void init_list(struct list *list)
+static inline void create_list(list_t *list)
 {
     list->next = list;
     list->prev = list;
 }
 
-static inline bool list_is_empty(struct list *list)
+static inline bool list_is_empty(list_t *list)
 {
     return list->next == NULL;
 }
 
-static inline void list_add_head(struct list *list, struct list *new_memb)
+static inline void list_add_head(list_t *list, list_t *new_memb)
 {
-    struct list *next = list->next;
+    list_t *next = list->next;
     next->prev = new_memb;
     list->next = new_memb;
     new_memb->prev = list;
@@ -159,9 +199,9 @@ static inline void list_add_head(struct list *list, struct list *new_memb)
         list->prev = new_memb;
 }
 
-static inline void list_add_tail(struct list *list, struct list *new_memb)
+static inline void list_add_tail(list_t *list, list_t *new_memb)
 {
-    struct list *prev = list->prev;
+    list_t *prev = list->prev;
     prev->next = new_memb;
     list->prev = new_memb;
     new_memb->next = list;
@@ -170,62 +210,87 @@ static inline void list_add_tail(struct list *list, struct list *new_memb)
         list->next = new_memb;
 }
 
-static inline bool list_remove(struct list *list)
+static inline bool list_remove(list_t *list)
 {
     if (list->next == list->prev)
         return false;
     
-    struct list *next = list->next;
-    struct list *prev = list->prev;
+    list_t *next = list->next;
+    list_t *prev = list->prev;
     next->prev = prev;
     prev->next = next;
     
     return true;
 }
 
+#define list_is_end(it, head, memb_name) \
+(&it->memb_name == head)
+
 #define list_for_each(it, head, memb_name) \
 for(it = memb_to_struct((head)->next, it, memb_name); \
-&it->memb_name != head; \
+!list_is_end(it, head, memb_name); \
 it = memb_to_struct(it->memb_name.next, it, memb_name))
 
 #define list_for_each_rev(it, head, memb_name) \
 for(it = memb_to_struct((head)->prev, it, memb_name); \
-&it->memb_name != head; \
+!list_is_end(it, head, memb_name); \
 it = memb_to_struct(it->memb_name.prev, it, memb_name))
 
 #define list_for_each_safe(it, tmp, head, memb_name) \
-for(it = memb_to_struct((head)->next, it, memb_name), tmp = it; \
-it = tmp, &it->memb_name != head; \
-it = memb_to_struct(it->memb_name.next, it, memb_name), tmp = it)
+for(it = memb_to_struct((head)->next, it, memb_name), \
+tmp = memb_to_struct(it->memb_name.next, it, memb_name); \
+!list_is_end(it, head, memb_name); \
+it = tmp, \
+tmp = memb_to_struct(it->memb_name.next, it, memb_name))
 
 #define list_for_each_rev_safe(it, tmp, head, memb_name) \
-for(it = memb_to_struct((head)->prev, it, memb_name), tmp = it; \
-it = tmp, &it->memb_name != head; \
-it = memb_to_struct(it->memb_name.prev, it, memb_name), tmp = it)
+for(it = memb_to_struct((head)->prev, it, memb_name), \
+tmp = memb_to_struct(it->memb_name.prev, it, memb_name); \
+!list_is_end(it, head, memb_name); \
+it = tmp, \
+tmp = memb_to_struct(it->memb_name.prev, it, memb_name))
+
+#define list_for(it, head, memb_name, count) \
+for(it = memb_to_struct((head)->next, it, memb_name); \
+count--; \
+it = memb_to_struct(it->memb_name.next, it, memb_name))
+
+#define list_for_rev(it, head, memb_name, count) \
+for(it = memb_to_struct((head)->prev, it, memb_name); \
+count--; \
+it = memb_to_struct(it->memb_name.prev, it, memb_name))
+
+#define list_for_safe(it, tmp, head, memb_name, count) \
+for(it = memb_to_struct((head)->next, it, memb_name), \
+tmp = memb_to_struct(it->memb_name.next, it, memb_name); \
+count--; it = tmp, \
+tmp = memb_to_struct(it->memb_name.next, it, memb_name))
+
+#define list_for_rev_safe(it, tmp, head, memb_name, count) \
+for(it = memb_to_struct((head)->prev, it, memb_name), \
+tmp = memb_to_struct(it->memb_name.prev, it, memb_name); \
+count--; it = tmp, \
+tmp = memb_to_struct(it->memb_name.prev, it, memb_name))
 
 // alloc.h
 typedef struct allocator allocator_t;
 typedef struct arena arena_t;
 typedef struct linear linear_t;
 
-#define def_allocate_fn(name) void *name(allocator_t *alloc, u64 size)
-#define def_reallocate_fn(name) void *name(allocator_t *alloc, void *p, u64 old_size, u64 new_size)
-#define def_deallocate_fn(name) void name(allocator_t *alloc, void *p)
+enum allocator_flags {
+    ALLOCATOR_FLAG_FREE_BUFFER = 0x01,
+};
 
 struct linear {
+    enum allocator_flags flags;
     u64 cap;
     u64 used;
     u8 *data;
 };
 
-struct arena_block {
-    struct linear linear;
-    struct list list;
-};
-
 struct arena {
-    u32 block_count;
     u32 min_block_size;
+    u32 block_count;
     struct list block_list;
 };
 
@@ -239,40 +304,68 @@ struct allocator {
 
 #define alloc_align(size) align(size, 16)
 
-def_allocate_fn(allocate_linear);
-def_reallocate_fn(reallocate_linear);
-def_deallocate_fn(deallocate_linear);
+#define def_create_allocator(name, type) void name(type ## _t *alloc, void *buf, u64 size)
+#define def_allocate(name, type) void *name(type ## _t *alloc, u64 size)
+#define def_reallocate(name, type) void *name(type ## _t *alloc, void *old_p, u64 old_size, u64 new_size)
+#define def_deallocate(name, type) void name(type ## _t *alloc, void *p, u64 size)
+#define def_destroy_allocator(name, type) void name(type ## _t *alloc)
 
-def_allocate_fn(allocate_arena);
-def_reallocate_fn(reallocate_arena);
-def_deallocate_fn(deallocate_arena);
+def_create_allocator(create_linear, linear);
+def_allocate(linear_allocate, linear);
+def_reallocate(linear_reallocate, linear);
+def_deallocate(linear_deallocate, linear);
+def_destroy_allocator(destroy_linear, linear);
 
-def_allocate_fn(allocate) {
+def_create_allocator(create_arena, arena);
+def_allocate(arena_allocate, arena);
+def_reallocate(arena_reallocate, arena);
+def_deallocate(arena_deallocate, arena);
+def_destroy_allocator(destroy_arena, arena);
+
+static inline def_create_allocator(create_allocator, allocator)
+{
     switch(alloc->type) {
-        case TYPE_LINEAR: return allocate_linear(alloc, size);
-        case TYPE_ARENA: return allocate_arena(alloc, size);
-        default:
-        invalid_default_case;
+        case TYPE_LINEAR: create_linear(&alloc->linear, buf, size); break;
+        case TYPE_ARENA: create_arena(&alloc->arena, buf, size); break;
+        default: invalid_default_case;
+    }
+}
+
+static inline def_allocate(allocate, allocator)
+{
+    switch(alloc->type) {
+        case TYPE_LINEAR: return linear_allocate(&alloc->linear, size);
+        case TYPE_ARENA: return arena_allocate(&alloc->arena, size);
+        default: invalid_default_case;
     }
     return NULL;
 }
 
-def_reallocate_fn(reallocate) {
+static inline def_reallocate(reallocate, allocator)
+{
     switch(alloc->type) {
-        case TYPE_LINEAR: return reallocate_linear(alloc, p, old_size, new_size);
-        case TYPE_ARENA: return reallocate_arena(alloc, p, old_size, new_size);
-        default:
-        invalid_default_case;
+        case TYPE_LINEAR: return linear_reallocate(&alloc->linear, old_p, old_size, new_size);
+        case TYPE_ARENA: return arena_reallocate(&alloc->arena, old_p, old_size, new_size);
+        default: invalid_default_case;
     }
     return NULL;
 }
 
-def_deallocate_fn(deallocate) {
+static inline def_deallocate(deallocate, allocator)
+{
     switch(alloc->type) {
-        case TYPE_LINEAR: deallocate_linear(alloc, p);
-        case TYPE_ARENA: deallocate_arena(alloc, p);
-        default:
-        invalid_default_case;
+        case TYPE_LINEAR: linear_deallocate(&alloc->linear, p, size); break;
+        case TYPE_ARENA: arena_deallocate(&alloc->arena, p, size); break;
+        default: invalid_default_case;
+    }
+}
+
+static inline def_destroy_allocator(destroy_allocator, allocator)
+{
+    switch(alloc->type) {
+        case TYPE_LINEAR: destroy_linear(&alloc->linear); break;
+        case TYPE_ARENA: destroy_arena(&alloc->arena); break;
+        default: invalid_default_case;
     }
 }
 
@@ -297,12 +390,12 @@ u64 write_file(char *uri, void *buf, u64 size)
     HANDLE fd = CreateFile(uri, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (fd != INVALID_HANDLE_VALUE) {
-        log_system_error("failed to open file %s", uri);
+        log_os_error("failed to open file %s", uri);
         goto out;
     }
     BOOL success = WriteFile(fd, buf, size, &res, NULL);
     if (!success) {
-        log_system_error("failed to write file %s", uri);
+        log_os_error("failed to write file %s", uri);
         goto out;
     }
     out:
@@ -316,12 +409,12 @@ u64 read_file(char *uri, void *buf, u64 size)
     HANDLE fd = CreateFile(uri, GENERIC_READ, 0, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
     if (fd != INVALID_HANDLE_VALUE) {
-        log_system_error("failed to open file %s", uri);
+        log_os_error("failed to open file %s", uri);
         goto out;
     }
     BOOL success = ReadFile(fd, buf, size, &res, NULL);
     if (!success) {
-        log_system_error("failed to read file %s", uri);
+        log_os_error("failed to read file %s", uri);
         goto out;
     }
     out:
@@ -488,45 +581,211 @@ u32 scb_snprintf(char *buf, u32 len, const char *fmt, ...)
     return bp;
 }
 
-// alloc.c
-def_allocate_fn(allocate_linear)
+// os.c
+struct os os;
+
+def_os_init(os_init)
 {
-    size = alloc_align(size);
-    if (alloc->linear.used + size > alloc->linear.cap)
-        return NULL;
-    
-    alloc->linear.used += size;
-    return alloc->linear.data + alloc->linear.used - alloc_align(size);
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    os.page_size = si.dwPageSize;
 }
 
-def_reallocate_fn(reallocate_linear)
+def_os_alloc(os_alloc)
 {
-    if (p == alloc->linear.data + alloc->linear.used - alloc_align(old_size)) {
-        alloc->linear.used -= alloc_align(old_size);
-        alloc->linear.used += alloc_align(new_size);
-        return alloc->linear.data + alloc->linear.used - alloc_align(new_size);
+    void *p = VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+    log_error_if(!p, "Failed to allocate %u bytes from OS", size);
+    return p;
+}
+
+def_os_free(os_free)
+{
+    bool b = VirtualFree(p, 0, MEM_RELEASE);
+    log_os_error_if(!b, "Failed to free address %u", p);
+}
+
+// alloc.c
+struct arena_header {
+    u64 validation_bits;
+    linear_t linear;
+    list_t list;
+    rc_t rc;
+};
+
+#define ARENA_HEADER_SIZE align(sizeof(struct arena_header), 16)
+#define ARENA_VALIDATION_BITS 0xcafebabecafebabe
+
+static inline bool linear_is_top(linear_t *alloc, void *p, u64 size)
+{
+    return p == alloc->data + alloc->used - alloc_align(size);
+}
+
+static inline bool arena_header_is_valid(struct arena_header *header)
+{
+    return header->validation_bits == ARENA_VALIDATION_BITS;
+}
+
+static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
+{
+    if (size < alloc->min_block_size)
+        size = alloc->min_block_size;
+    
+    u8 *mem = os_alloc(size + ARENA_HEADER_SIZE);
+    if (!mem)
+        return NULL;
+    
+    struct arena_header *block = (struct arena_header*)(mem + size);
+    memset(block, 0, sizeof(*block));
+    
+    block->validation_bits = ARENA_VALIDATION_BITS;
+    create_linear(&block->linear, mem, size);
+    alloc->block_count += 1;
+    return block;
+}
+
+static void destroy_arena_block(arena_t *alloc, struct arena_header *block)
+{
+    os_free(block->linear.data, block->linear.cap + ARENA_HEADER_SIZE);
+    alloc->block_count -= alloc->block_count > 0;
+}
+
+struct arena_header* arena_find_block(arena_t *alloc, void *p)
+{
+    struct arena_header *block;
+    u32 count = alloc->block_count;
+    list_for(block, &alloc->block_list, list, count) {
+        if (p > block->linear.data ||
+            p < block->linear.data + block->linear.cap)
+            break;
+    }
+    log_error_if(list_is_end(block, &alloc->block_list, list),
+                 "Failed to find block containing address %u", p);
+    return block;
+}
+
+static void* arena_header_allocate(struct arena_header *block, u64 size)
+{
+    log_error_if(!arena_header_is_valid(block), "Failed to validate arena header");
+    rc_inc(&block->rc);
+    return linear_allocate(&block->linear, size);
+}
+
+static void arena_header_deallocate(arena_t *alloc, struct arena_header *block, void *p, u64 size)
+{
+    log_error_if(!arena_header_is_valid(block), "Failed to validate arena header");
+    if (!rc_dec(&block->rc)) {
+        destroy_arena_block(alloc, block);
+        return;
+    }
+    linear_deallocate(&block->linear, p, size);
+}
+
+def_create_allocator(create_linear, linear)
+{
+    size = alloc_align(size);
+    
+    if (!buf)
+        buf = os_alloc(size);
+    
+    alloc->data = buf;
+    alloc->cap = size;
+    alloc->used = 0;
+}
+
+def_allocate(linear_allocate, linear)
+{
+    size = alloc_align(size);
+    if (alloc->used + size > alloc->cap)
+        return NULL;
+    
+    alloc->used += size;
+    return alloc->data + alloc->used - alloc_align(size);
+}
+
+def_reallocate(linear_reallocate, linear)
+{
+    if (linear_is_top(alloc, old_p, old_size)) {
+        alloc->used -= alloc_align(old_size);
+        alloc->used += alloc_align(new_size);
+        return alloc->data + alloc->used - alloc_align(new_size);
     }
     
     if (new_size < old_size)
-        return p;
+        return old_p;
     
-    void *ret = allocate_linear(alloc, new_size);
-    memcpy(ret, p, old_size);
-    return ret;
+    void *p = linear_allocate(alloc, new_size);
+    memcpy(p, old_p, old_size);
+    return p;
 }
 
-def_deallocate_fn(deallocate_linear) {}
-
-def_allocate_fn(allocate_arena)
+def_deallocate(linear_deallocate, linear)
 {
+    if (linear_is_top(alloc, p, size))
+        alloc->used -= alloc_align(size);
 }
 
-def_reallocate_fn(reallocate_arena)
+def_destroy_allocator(destroy_linear, linear)
 {
+    if (alloc->flags & ALLOCATOR_FLAG_FREE_BUFFER)
+        os_free(alloc->data, alloc->cap);
+    memset(alloc, 0, sizeof(*alloc));
 }
 
-def_deallocate_fn(deallocate_arena)
+def_create_allocator(create_arena, arena)
 {
+    alloc->min_block_size = size;
+    alloc->block_count = 0;
+    create_list(&alloc->block_list);
+}
+
+def_allocate(arena_allocate, arena)
+{
+    struct arena_header *block;
+    u32 count = alloc->block_count;
+    list_for(block, &alloc->block_list, list, count) {
+        void *p = arena_header_allocate(block, size);
+        if (p)
+            return p;
+    }
+    
+    block = create_arena_block(alloc, size);
+    if (!block)
+        return NULL;
+    
+    list_add_tail(&alloc->block_list, &block->list);
+    return arena_header_allocate(block, size);
+}
+
+def_reallocate(arena_reallocate, arena)
+{
+    void *p;
+    struct arena_header *block = arena_find_block(alloc, old_p);
+    
+    if (!linear_is_top(&block->linear, old_p, old_size)) {
+        p = linear_reallocate(&block->linear, old_p, old_size, new_size);
+        if (p)
+            return p;
+    }
+    
+    arena_header_deallocate(alloc, block, old_p, old_size);
+    p = arena_allocate(alloc, new_size);
+    memcpy(p, old_p, old_size);
+    return p;
+}
+
+def_deallocate(arena_deallocate, arena)
+{
+    struct arena_header *block = arena_find_block(alloc, p);
+    arena_header_deallocate(alloc, block, p, size);
+}
+
+def_destroy_allocator(destroy_arena, arena)
+{
+    struct arena_header *block, *tmp;
+    list_for_safe(block, tmp, &alloc->block_list, list, alloc->block_count) {
+        list_remove(&block->list);
+        destroy_arena_block(alloc, block);
+    }
 }
 
 #endif // SOL_DEF
