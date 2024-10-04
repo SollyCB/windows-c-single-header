@@ -5,9 +5,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <string.h>
 #include <intrin.h>
-#include <ammintrin.h>
-#include <immintrin.h>
 #include <windows.h>
 
 typedef int8_t   s8;
@@ -41,21 +40,10 @@ typedef uint64_t u64;
 #define typeof(x) __typeof__(x)
 #define maxif(x) (0UL - (bool)(x))
 #define cl_align(x) __declspec(align(x))
+#define cl_array_len(x) (sizeof(x)/sizeof(x[0]))
 
 #define memb_to_struct(memb, memb_of, memb_name) \
 ((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
-
-#define fmt_error(buf, size, err) \
-do { \
-FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, 0, 0, buf, size, NULL); \
-} while (0);
-
-#define print_error() \
-do { \
-char m__buf[512]; \
-fmt_error(m__buf, sizeof(m__buf), GetLastError()); \
-printf("%s\n", m__buf); \
-} while(0);
 
 enum type {
     TYPE_LINEAR,
@@ -69,20 +57,28 @@ static inline u64 align(u64 size, u64 alignment) {
 
 // os.h
 extern struct os {
+    bool is_valid;
     u32 page_size;
+    HANDLE stdout_handle;
 } os;
 
-#define def_os_init(name) void name(void)
-def_os_init(os_init);
+#define def_create_os(name) void name(void)
+def_create_os(create_os);
 
-#define def_os_error_string(name) void name(char *buf, u32 len)
+#define def_os_error_string(name) void name(char *buf, u32 size)
 def_os_error_string(os_error_string);
 
-#define def_os_alloc(name) void* name(u64 size)
-def_os_alloc(os_alloc);
+#define def_os_allocate(name) void* name(u64 size)
+def_os_allocate(os_allocate);
 
-#define def_os_free(name) void name(void *p, u64 size)
-def_os_free(os_free);
+#define def_os_deallocate(name) void name(void *p, u64 size)
+def_os_deallocate(os_deallocate);
+
+#define def_os_page_size(name) u32 name(void)
+def_os_page_size(os_page_size);
+
+#define def_os_stdout(name) HANDLE name(void)
+def_os_stdout(os_stdout);
 
 // rc.h
 typedef struct rc rc_t;
@@ -108,33 +104,38 @@ static inline bool rc_dec(rc_t *rc)
 }
 
 // file.h
-void write_stdout(char *buf, u64 size);
+#define def_write_stdout(name) void name(char *buf, u64 size)
+def_write_stdout(write_stdout);
 
-u64 write_file(char *uri, void *buf, u64 size);
-u64 read_file(char *uri, void *buf, u64 size);
+#define def_write_file(name) u64 name(char *uri, void *buf, u64 size)
+def_write_file(write_file);
+
+#define def_read_file(name) u64 name(char *uri, void *buf, u64 size)
+def_read_file(read_file);
 
 // print.h
-u32 scb_snprintf(char *buf, u32 len, const char *fmt, ...);
+#define def_snprintf(name) u32 name(char *buf, u32 len, const char *fmt, ...)
+def_snprintf(scb_snprintf);
 
 #define print(fmt, ...) \
 do { \
-char m__buf[2046]; \
-u32 m__len = scb_snprintf(m__buf, sizeof(m__buf), fmt, __VA_ARGS__); \
-write_stdout(m__buf, m__len); \
+char m__print_buf[2046]; \
+u32 m__print_size = scb_snprintf(m__print_buf, sizeof(m__print_buf), fmt, __VA_ARGS__); \
+write_stdout(m__print_buf, m__print_size); \
 } while(0);
 
 #define println(fmt, ...) \
 do { \
-char m__buf[2046]; \
-u32 m__len = scb_snprintf(m__buf, sizeof(m__buf), fmt, __VA_ARGS__); \
-m__buf[m__len++] = '\n'; \
-write_stdout(m__buf, m__len); \
+char m__println_buf[2046]; \
+u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, __VA_ARGS__); \
+m__println_buf[m__println_size++] = '\n'; \
+write_stdout(m__println_buf, m__println_size); \
 } while(0);
 
 // assert.h
 #define assert(x) \
 if (!(x)) { \
-println("%s", #x); \
+println("[%s, %s, %u] ASSERT : %s", __FILE__, __FUNCTION__, __LINE__, #x); \
 __debugbreak(); \
 }
 
@@ -146,7 +147,7 @@ __debugbreak(); \
 
 #define log_error(...) \
 do { \
-print("[%s, %s, %u%] LOG ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
+print("[%s, %s, %u] LOG ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
 println(__VA_ARGS__); \
 log_break; \
 } while(0);
@@ -156,11 +157,11 @@ do { if (prec) log_error(__VA_ARGS__); } while(0);
 
 #define log_os_error(...) \
 do { \
-print("[%s, %s, %u%] LOG OS ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
-char m__buf[512]; \
+char m__log_os_error_buf[512]; \
+os_error_string(m__log_os_error_buf, sizeof(m__log_os_error_buf)); \
+print("[%s, %s, %u] LOG OS ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
 print(__VA_ARGS__); \
-fmt_error(m__buf, sizeof(m__buf), GetLastError()); \
-println(" : %s", m__buf); \
+println(" : %s", m__log_os_error_buf); \
 log_break; \
 } while(0);
 
@@ -283,7 +284,7 @@ enum allocator_flags {
 
 struct linear {
     enum allocator_flags flags;
-    u64 cap;
+    u64 size;
     u64 used;
     u8 *data;
 };
@@ -304,32 +305,48 @@ struct allocator {
 
 #define alloc_align(size) align(size, 16)
 
-#define def_create_allocator(name, type) void name(type ## _t *alloc, void *buf, u64 size)
-#define def_allocate(name, type) void *name(type ## _t *alloc, u64 size)
-#define def_reallocate(name, type) void *name(type ## _t *alloc, void *old_p, u64 old_size, u64 new_size)
-#define def_deallocate(name, type) void name(type ## _t *alloc, void *p, u64 size)
-#define def_destroy_allocator(name, type) void name(type ## _t *alloc)
-
+#define def_create_allocator(name, type) void name(void *buf, u64 size, type ## _t *alloc)
 def_create_allocator(create_linear, linear);
-def_allocate(linear_allocate, linear);
-def_reallocate(linear_reallocate, linear);
-def_deallocate(linear_deallocate, linear);
-def_destroy_allocator(destroy_linear, linear);
-
 def_create_allocator(create_arena, arena);
+
+#define def_allocate(name, type) void *name(type ## _t *alloc, u64 size)
+def_allocate(linear_allocate, linear);
 def_allocate(arena_allocate, arena);
+
+#define def_reallocate(name, type) void *name(type ## _t *alloc, void *old_p, u64 old_size, u64 new_size)
+def_reallocate(linear_reallocate, linear);
 def_reallocate(arena_reallocate, arena);
+
+#define def_allocator_size(name, type) u64 name(type ## _t *alloc)
+def_allocator_size(linear_size, linear);
+def_allocator_size(arena_size, arena);
+
+#define def_allocator_used(name, type) u64 name(type ## _t *alloc)
+def_allocator_used(linear_used, linear);
+def_allocator_used(arena_used, arena);
+
+#define def_deallocate(name, type) void name(type ## _t *alloc, void *p, u64 size)
+def_deallocate(linear_deallocate, linear);
 def_deallocate(arena_deallocate, arena);
+
+#define def_destroy_allocator(name, type) void name(type ## _t *alloc)
+def_destroy_allocator(destroy_linear, linear);
 def_destroy_allocator(destroy_arena, arena);
 
 static inline def_create_allocator(create_allocator, allocator)
 {
     switch(alloc->type) {
-        case TYPE_LINEAR: create_linear(&alloc->linear, buf, size); break;
-        case TYPE_ARENA: create_arena(&alloc->arena, buf, size); break;
+        case TYPE_LINEAR: create_linear(buf, size, &alloc->linear); break;
+        case TYPE_ARENA: create_arena(buf, size, &alloc->arena); break;
         default: invalid_default_case;
     }
 }
+
+#define create_allocator_linear(buf, size, alloc) \
+do { (alloc)->type = TYPE_LINEAR; create_allocator(buf, size, alloc); } while(0);
+
+#define create_allocator_arena(buf, size, alloc) \
+do { (alloc)->type = TYPE_ARENA; create_allocator(buf, size, alloc); } while(0);
 
 static inline def_allocate(allocate, allocator)
 {
@@ -339,6 +356,26 @@ static inline def_allocate(allocate, allocator)
         default: invalid_default_case;
     }
     return NULL;
+}
+
+static inline def_allocator_size(allocator_size, allocator)
+{
+    switch(alloc->type) {
+        case TYPE_LINEAR: return linear_size(&alloc->linear);
+        case TYPE_ARENA: return arena_size(&alloc->arena);
+        default: invalid_default_case;
+    }
+    return Max_u64;
+}
+
+static inline def_allocator_used(allocator_used, allocator)
+{
+    switch(alloc->type) {
+        case TYPE_LINEAR: return linear_used(&alloc->linear);
+        case TYPE_ARENA: return arena_used(&alloc->arena);
+        default: invalid_default_case;
+    }
+    return Max_u64;
 }
 
 static inline def_reallocate(reallocate, allocator)
@@ -371,6 +408,49 @@ static inline def_destroy_allocator(destroy_allocator, allocator)
 
 #ifdef SOL_DEF
 
+// os.c
+struct os os = {};
+
+def_create_os(create_os)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    os.page_size = si.dwPageSize;
+    os.stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+}
+
+def_os_error_string(os_error_string)
+{
+    FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, GetLastError(), 0, buf, size, NULL);
+}
+
+def_os_allocate(os_allocate)
+{
+    void *p = VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
+    log_error_if(!p, "Failed to allocate %u bytes from OS", size);
+    return p;
+}
+
+def_os_deallocate(os_deallocate)
+{
+    bool b = VirtualFree(p, 0, MEM_RELEASE);
+    log_os_error_if(!b, "Failed to free address %u", p);
+}
+
+def_os_page_size(os_page_size)
+{
+    if (!os.is_valid)
+        create_os();
+    return os.page_size;
+}
+
+def_os_stdout(os_stdout)
+{
+    if (!os.is_valid)
+        create_os();
+    return os.stdout_handle;
+}
+
 // file.c
 enum {
     FILE_READ = 0x0,
@@ -378,13 +458,12 @@ enum {
     FILE_CREATE = 0x02,
 };
 
-void write_stdout(char *buf, u64 size)
+def_write_stdout(write_stdout)
 {
-    HANDLE fd = GetStdHandle(STD_OUTPUT_HANDLE);
-    WriteFile(fd, buf, size, NULL, NULL);
+    WriteFile(os_stdout(), buf, (u32)size, NULL, NULL);
 }
 
-u64 write_file(char *uri, void *buf, u64 size)
+def_write_file(write_file)
 {
     u32 res = 0;
     HANDLE fd = CreateFile(uri, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
@@ -393,7 +472,7 @@ u64 write_file(char *uri, void *buf, u64 size)
         log_os_error("failed to open file %s", uri);
         goto out;
     }
-    BOOL success = WriteFile(fd, buf, size, &res, NULL);
+    BOOL success = WriteFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
         log_os_error("failed to write file %s", uri);
         goto out;
@@ -403,18 +482,27 @@ u64 write_file(char *uri, void *buf, u64 size)
     return res;
 }
 
-u64 read_file(char *uri, void *buf, u64 size)
+def_read_file(read_file)
 {
+    OFSTRUCT info;
+    if (!buf) {
+        HFILE fd = OpenFile(uri, &info, OF_PARSE);
+        if (fd == HFILE_ERROR) {
+            println("INVALID");
+        } else {
+            println("CLOSE IT");
+        }
+    }
     u32 res = 0;
     HANDLE fd = CreateFile(uri, GENERIC_READ, 0, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
-    if (fd != INVALID_HANDLE_VALUE) {
-        log_os_error("failed to open file %s", uri);
+    if (fd == INVALID_HANDLE_VALUE) {
+        log_os_error("Failed to open file %s", uri);
         goto out;
     }
-    BOOL success = ReadFile(fd, buf, size, &res, NULL);
+    BOOL success = ReadFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
-        log_os_error("failed to read file %s", uri);
+        log_os_error("Failed to read file %s", uri);
         goto out;
     }
     out:
@@ -440,6 +528,9 @@ static u32 pr_parse_u(char *buf, u64 x, u32 f)
     u32 zc = 0;
     char tmp[128];
     
+    if (x == 0)
+        tmp[bp++] = '0';
+    
     if (f & PR_Z) {
         zc = clz64(x) & maxif(popcnt(x));
         if (f & PR_H)
@@ -447,7 +538,7 @@ static u32 pr_parse_u(char *buf, u64 x, u32 f)
     }
     if (f & PR_H) {
         while(x > 0) {
-            u32 b = x & 0xf;
+            char b = (char)x & 0xf;
             if (b > 9)
                 tmp[bp++] = 'a' + (b - 10);
             else
@@ -489,7 +580,7 @@ static u32 pr_parse_i(char *buf, s64 x, u32 f)
 
 static u32 pr_parse_s(char *buf, char *x, u32 f)
 {
-    u32 bp = strlen(x);
+    u32 bp = (u32)strlen(x);
     memcpy(buf, x, bp);
     return bp;
 }
@@ -524,13 +615,13 @@ static inline bool pr_is_ident(char c)
     }
 }
 
-u32 scb_snprintf(char *buf, u32 len, const char *fmt, ...)
+def_snprintf(scb_snprintf)
 {
     va_list va;
     va_start(va, fmt);
     u32 f = 0;
     u32 bp = 0;
-    u32 sl = strlen(fmt);
+    u32 sl = (u32)strlen(fmt);
     
     for(u32 i=0; i < sl; ++i) {
         f = 0;
@@ -581,29 +672,6 @@ u32 scb_snprintf(char *buf, u32 len, const char *fmt, ...)
     return bp;
 }
 
-// os.c
-struct os os;
-
-def_os_init(os_init)
-{
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    os.page_size = si.dwPageSize;
-}
-
-def_os_alloc(os_alloc)
-{
-    void *p = VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
-    log_error_if(!p, "Failed to allocate %u bytes from OS", size);
-    return p;
-}
-
-def_os_free(os_free)
-{
-    bool b = VirtualFree(p, 0, MEM_RELEASE);
-    log_os_error_if(!b, "Failed to free address %u", p);
-}
-
 // alloc.c
 struct arena_header {
     u64 validation_bits;
@@ -630,7 +698,7 @@ static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
     if (size < alloc->min_block_size)
         size = alloc->min_block_size;
     
-    u8 *mem = os_alloc(size + ARENA_HEADER_SIZE);
+    u8 *mem = os_allocate(size + ARENA_HEADER_SIZE);
     if (!mem)
         return NULL;
     
@@ -638,14 +706,14 @@ static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
     memset(block, 0, sizeof(*block));
     
     block->validation_bits = ARENA_VALIDATION_BITS;
-    create_linear(&block->linear, mem, size);
+    create_linear(mem, size, &block->linear);
     alloc->block_count += 1;
     return block;
 }
 
 static void destroy_arena_block(arena_t *alloc, struct arena_header *block)
 {
-    os_free(block->linear.data, block->linear.cap + ARENA_HEADER_SIZE);
+    os_deallocate(block->linear.data, block->linear.size + ARENA_HEADER_SIZE);
     alloc->block_count -= alloc->block_count > 0;
 }
 
@@ -654,8 +722,8 @@ struct arena_header* arena_find_block(arena_t *alloc, void *p)
     struct arena_header *block;
     u32 count = alloc->block_count;
     list_for(block, &alloc->block_list, list, count) {
-        if (p > block->linear.data ||
-            p < block->linear.data + block->linear.cap)
+        if ((u8*)p > block->linear.data &&
+            (u8*)p < block->linear.data + block->linear.size)
             break;
     }
     log_error_if(list_is_end(block, &alloc->block_list, list),
@@ -685,17 +753,17 @@ def_create_allocator(create_linear, linear)
     size = alloc_align(size);
     
     if (!buf)
-        buf = os_alloc(size);
+        buf = os_allocate(size);
     
     alloc->data = buf;
-    alloc->cap = size;
+    alloc->size = size;
     alloc->used = 0;
 }
 
 def_allocate(linear_allocate, linear)
 {
     size = alloc_align(size);
-    if (alloc->used + size > alloc->cap)
+    if (alloc->used + size > alloc->size)
         return NULL;
     
     alloc->used += size;
@@ -709,13 +777,22 @@ def_reallocate(linear_reallocate, linear)
         alloc->used += alloc_align(new_size);
         return alloc->data + alloc->used - alloc_align(new_size);
     }
-    
     if (new_size < old_size)
         return old_p;
     
     void *p = linear_allocate(alloc, new_size);
     memcpy(p, old_p, old_size);
     return p;
+}
+
+def_allocator_size(linear_size, linear)
+{
+    return alloc->size;
+}
+
+def_allocator_used(linear_used, linear)
+{
+    return alloc->used;
 }
 
 def_deallocate(linear_deallocate, linear)
@@ -727,13 +804,14 @@ def_deallocate(linear_deallocate, linear)
 def_destroy_allocator(destroy_linear, linear)
 {
     if (alloc->flags & ALLOCATOR_FLAG_FREE_BUFFER)
-        os_free(alloc->data, alloc->cap);
+        os_deallocate(alloc->data, alloc->size);
     memset(alloc, 0, sizeof(*alloc));
 }
 
 def_create_allocator(create_arena, arena)
 {
-    alloc->min_block_size = size;
+    log_error_if(size > Max_u32, "minimum arena block size cannot be greater than 4GB");
+    alloc->min_block_size = (u32)size;
     alloc->block_count = 0;
     create_list(&alloc->block_list);
 }
@@ -742,6 +820,7 @@ def_allocate(arena_allocate, arena)
 {
     struct arena_header *block;
     u32 count = alloc->block_count;
+    
     list_for(block, &alloc->block_list, list, count) {
         void *p = arena_header_allocate(block, size);
         if (p)
@@ -761,7 +840,7 @@ def_reallocate(arena_reallocate, arena)
     void *p;
     struct arena_header *block = arena_find_block(alloc, old_p);
     
-    if (!linear_is_top(&block->linear, old_p, old_size)) {
+    if (linear_is_top(&block->linear, old_p, old_size)) {
         p = linear_reallocate(&block->linear, old_p, old_size, new_size);
         if (p)
             return p;
@@ -771,6 +850,30 @@ def_reallocate(arena_reallocate, arena)
     p = arena_allocate(alloc, new_size);
     memcpy(p, old_p, old_size);
     return p;
+}
+
+def_allocator_size(arena_size, arena)
+{
+    u64 size = 0;
+    u32 count = alloc->block_count;
+    struct arena_header *block;
+    
+    list_for(block, &alloc->block_list, list, count)
+        size += align(linear_size(&block->linear) + ARENA_HEADER_SIZE, os_page_size());
+    
+    return size;
+}
+
+def_allocator_used(arena_used, arena)
+{
+    u64 size = 0;
+    u32 count = alloc->block_count;
+    struct arena_header *block;
+    
+    list_for(block, &alloc->block_list, list, count)
+        size += linear_used(&block->linear);
+    
+    return size;
 }
 
 def_deallocate(arena_deallocate, arena)
