@@ -104,6 +104,8 @@ static inline bool rc_dec(rc_t *rc)
 }
 
 // file.h
+#define FILE_ERROR Max_u64
+
 #define def_write_stdout(name) void name(char *buf, u64 size)
 def_write_stdout(write_stdout);
 
@@ -468,44 +470,53 @@ def_write_file(write_file)
     u32 res = 0;
     HANDLE fd = CreateFile(uri, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, NULL);
-    if (fd != INVALID_HANDLE_VALUE) {
-        log_os_error("failed to open file %s", uri);
-        goto out;
+    if (fd == INVALID_HANDLE_VALUE) {
+        log_os_error("Failed to open file %s", uri);
+        return FILE_ERROR;
     }
+    
     BOOL success = WriteFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
-        log_os_error("failed to write file %s", uri);
-        goto out;
+        log_os_error("Failed to write file %s", uri);
+        CloseHandle(fd);
+        return FILE_ERROR;
     }
-    out:
+    
     CloseHandle(fd);
     return res;
 }
 
 def_read_file(read_file)
 {
-    OFSTRUCT info;
     if (!buf) {
-        HFILE fd = OpenFile(uri, &info, OF_PARSE);
-        if (fd == HFILE_ERROR) {
-            println("INVALID");
-        } else {
-            println("CLOSE IT");
+        WIN32_FIND_DATA info;
+        HANDLE fd = FindFirstFile(uri, &info);
+        
+        if (fd == INVALID_HANDLE_VALUE) {
+            log_os_error("Failed to find file %s", uri);
+            return FILE_ERROR;
         }
+        
+        FindClose(fd);
+        return info.nFileSizeLow;
     }
+    
     u32 res = 0;
     HANDLE fd = CreateFile(uri, GENERIC_READ, 0, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
+    
     if (fd == INVALID_HANDLE_VALUE) {
         log_os_error("Failed to open file %s", uri);
-        goto out;
+        return FILE_ERROR;
     }
+    
     BOOL success = ReadFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
         log_os_error("Failed to read file %s", uri);
-        goto out;
+        CloseHandle(fd);
+        return FILE_ERROR;
     }
-    out:
+    
     CloseHandle(fd);
     return res;
 }
