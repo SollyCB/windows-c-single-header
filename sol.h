@@ -28,6 +28,9 @@ typedef uint64_t u64;
 #define Max_u64 0xffffffffffffffff
 
 #define ctz(x)      _tzcnt_u64(x)
+#define ctz64(x)    _tzcnt_u64(x)
+#define ctz32(x)    _tzcnt_u32(x)
+#define ctz16(x)    _tzcnt_u16(x)
 #define clz(x)      __lzcnt64(x)
 #define clz16(x)    __lzcnt16(x)
 #define clz32(x)    __lzcnt(x)
@@ -406,6 +409,76 @@ static inline def_destroy_allocator(destroy_allocator, allocator)
         case TYPE_ARENA: destroy_arena(&alloc->arena); break;
         default: invalid_default_case;
     }
+}
+
+// string.h
+struct string {
+    u64 size;
+    char *data;
+};
+
+// dict.h
+typedef struct dict dict_t;
+typedef struct dict_iter dict_iter_t;
+
+#define def_get_dict_key(name) u64 name(struct string key)
+#define def_dict_insert(name) void* dict_insert(dict_t *dict, struct string key, void *val, u64 stride)
+#define def_dict_find(name) void* dict_find(dict_t *dict, struct string key, u64 stride)
+#define def_dict_remove(name) bool dict_remove(dict_t *dict, struct string key, u64 stride)
+#define def_dict_get_iter(name) void dict_get_iter(dict_t *dict, dict_iter_t *iter)
+#define def_dict_iter_next(name) void* dict_iter_next(dict_iter_t *iter, u64 stride)
+
+def_get_dict_key(get_dict_key);
+def_dict_insert(dict_insert);
+def_dict_find(dict_find);
+def_dict_remove(dict_remove);
+def_dict_get_iter(dict_get_iter);
+def_dict_iter_next(dict_iter_next);
+
+#define def_typed_dict(abbrev, val) \
+struct abbrev ## _dict_kv { \
+u64 key; \
+typeof(*val) val; \
+}; \
+typedef struct abbrev ## _dict { \
+u32 cap; \
+u32 rem; \
+typeof(val) data; \
+allocator_t *alloc; \
+} abbrev ## dict_t; \
+\
+typedef struct abbrev ## _dict_iter { \
+abbrev ## _dict_t *dict; \
+u32 pos; \
+} abbrev ## _dict_iter_t; \
+\
+static inline struct abbrev ## _dict_kv* \
+abbrev ## _dict_insert(abbrev ## _dict_t *dict, struct string key, typeof(val) val) \
+{ \
+return (struct abbrev ## _dict_kv*)dict_insert((dict_t*)dict, key, val, sizeof(*dict->data)); \
+} \
+\
+static inline struct abbrev ## _dict_kv* \
+abbrev ## _dict_find(abbrev ## _dict_t *dict, struct string key) \
+{ \
+return (struct abbrev ## _dict_kv*)dict_find((dict_t*)dict, key, sizeof(*dict->data)); \
+} \
+\
+static inline struct abbrev ## _dict_kv* \
+abbrev ## _dict_remove(abbrev ## _dict_t *dict, struct string key) \
+{ \
+return (struct abbrev ## _dict_kv*)dict_remove((dict_t*)dict, key, sizeof(*dict->data)); \
+} \
+\
+static inline void abbrev ## _dict_get_iter(abbrev ## _dict_t *dict, abbrev ## _dict_iter_t *iter) \
+{ \
+dict_get_iter((dict_t*)dict, (dict_iter_t*)iter); \
+} \
+\
+static inline abbrev ## _dict_kv* \
+abbrev ## _dict_iter_next(abbrev ## _dict_iter_t *iter) \
+{ \
+return (struct abbrev ## _dict_kv*)dict_iter_next((dict_iter_t*)iter, sizeof(*iter->dict->data)); \
 }
 
 #ifdef SOL_DEF
@@ -900,6 +973,329 @@ def_destroy_allocator(destroy_arena, arena)
         list_remove(&block->list);
         destroy_arena_block(alloc, block);
     }
+}
+
+// dict.c
+typedef struct dict {
+    u32 cap;
+    u32 rem;
+    u8 *data;
+    allocator_t *alloc;
+} dict_t;
+
+typedef struct dict_probe {
+    dict_t *dict;
+    u32 pos;
+    u32 stride;
+} dict_probe_t;
+
+typedef struct dict_iter {
+    dict_t *dict;
+    u32 pos;
+} dict_iter_t;
+
+enum {
+    DICT_EMPTY = 0x0,
+    DICT_FULL = 0x80,
+};
+
+#define DICT_GROUP_SIZE 16
+
+uint64_t rapidhash(const void *key, size_t len);
+
+static void dict_get_probe(dict_t *dict, dict_probe_t *probe)
+{
+    probe->dict = dict;
+    probe->pos = 0;
+    probe->stride = 0;
+}
+
+static u32 dict_probe_next(dict_probe_t *probe)
+{
+    u32 ret = probe->pos;
+    probe->stride += 16;
+    
+    if (probe->stride >= probe->dict->cap)
+        return Max_u32;
+    
+    probe->pos = (probe->pos + probe->stride) & (probe->dict->cap - 1);
+    return ret;
+}
+
+def_get_dict_key(get_dict_key)
+{
+    return rapidhash(key.data, key.size);
+}
+
+def_dict_insert(dict_insert)
+{
+    return NULL;
+}
+
+def_dict_find(dict_find)
+{
+    return NULL;
+}
+
+def_dict_remove(dict_remove)
+{
+    return false;
+}
+
+def_dict_get_iter(dict_get_iter)
+{
+    iter->dict = dict;
+    iter->pos = 0;
+}
+
+def_dict_iter_next(dict_iter_next)
+{
+    u32 ofs = iter->pos & (DICT_GROUP_SIZE - 1);
+    u32 grp = iter->pos - ofs;
+    u16 mask = (u16)_mm_movemask_epi8(*(__m128i*)(iter->dict->data + grp)) & (0xffff << ofs);
+    
+    if (!mask)
+        iter->pos += DICT_GROUP_SIZE - (iter->pos & (DICT_GROUP_SIZE - 1));
+    else
+        goto group_found;
+    
+    for(; iter->pos < iter->dict->cap; iter->pos += DICT_GROUP_SIZE) {
+        mask = (u16)_mm_movemask_epi8(*(__m128i*)(iter->dict->data + iter->pos));
+        if (mask)
+            goto group_found;
+        
+        iter->pos += DICT_GROUP_SIZE;
+    }
+    return NULL;
+    
+    group_found:
+    iter->pos += ctz16(mask) + 1;
+    return iter->dict->data + iter->dict->cap + stride * (iter->pos-1);
+}
+
+//               ***************** EXTERNAL CODE *******************
+//
+// Code that is not mine, but which is very useful to me. I am very grateful
+// to the creators, although I do intend to replace their implementations with
+// my own at some point.
+//
+
+/*
+ * rapidhash - Very fast, high quality, platform-independent hashing algorithm.
+ * Copyright (C) 2024 Nicolas De Carli
+ *
+ * Based on 'wyhash', by Wang Yi <godspeed_china@yeah.net>
+ *
+ * BSD 2-Clause License (https://www.opensource.org/licenses/bsd-license.php)
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met:
+ *
+ *    * Redistributions of source code must retain the above copyright
+ *      notice, this list of conditions and the following disclaimer.
+ *    * Redistributions in binary form must reproduce the above
+ *      copyright notice, this list of conditions and the following disclaimer
+ *      in the documentation and/or other materials provided with the
+ *      distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * You can contact the author at:
+ *   - rapidhash source repository: https://github.com/Nicoshev/rapidhash
+ */
+
+#include <stdint.h>
+#include <string.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#if defined(_M_X64) && !defined(_M_ARM64EC)
+#pragma intrinsic(_umul128)
+#endif
+#endif
+
+#ifdef __cplusplus
+#define RAPIDHASH_NOEXCEPT noexcept
+#define RAPIDHASH_CONSTEXPR constexpr
+#ifndef RAPIDHASH_INLINE
+#define RAPIDHASH_INLINE inline
+#endif
+#else
+#define RAPIDHASH_NOEXCEPT
+#define RAPIDHASH_CONSTEXPR static const
+#ifndef RAPIDHASH_INLINE
+#define RAPIDHASH_INLINE static inline
+#endif
+#endif
+
+#ifndef RAPIDHASH_PROTECTED
+#define RAPIDHASH_FAST
+#elif defined(RAPIDHASH_FAST)
+#error "cannot define RAPIDHASH_PROTECTED and RAPIDHASH_FAST simultaneously."
+#endif
+
+#ifndef RAPIDHASH_COMPACT
+#define RAPIDHASH_UNROLLED
+#elif defined(RAPIDHASH_UNROLLED)
+#error "cannot define RAPIDHASH_COMPACT and RAPIDHASH_UNROLLED simultaneously."
+#endif
+
+#if defined(__GNUC__) || defined(__INTEL_COMPILER) || defined(__clang__)
+#define _likely_(x)  __builtin_expect(x,1)
+#define _unlikely_(x)  __builtin_expect(x,0)
+#else
+#define _likely_(x) (x)
+#define _unlikely_(x) (x)
+#endif
+
+#ifndef RAPIDHASH_LITTLE_ENDIAN
+#if defined(_WIN32) || defined(__LITTLE_ENDIAN__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define RAPIDHASH_LITTLE_ENDIAN
+#elif defined(__BIG_ENDIAN__) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#define RAPIDHASH_BIG_ENDIAN
+#else
+#warning "could not determine endianness! Falling back to little endian."
+#define RAPIDHASH_LITTLE_ENDIAN
+#endif
+#endif
+
+#define RAPID_SEED (0xbdd89aa982704029ull)
+
+RAPIDHASH_CONSTEXPR uint64_t rapid_secret[3] = {0x2d358dccaa6c78a5ull, 0x8bb84b93962eacc9ull, 0x4b33a62ed433d4a3ull};
+
+RAPIDHASH_INLINE void rapid_mum(uint64_t *A, uint64_t *B) RAPIDHASH_NOEXCEPT {
+#if defined(__SIZEOF_INT128__)
+    __uint128_t r=*A; r*=*B;
+#ifdef RAPIDHASH_PROTECTED
+    *A^=(uint64_t)r; *B^=(uint64_t)(r>>64);
+#else
+    *A=(uint64_t)r; *B=(uint64_t)(r>>64);
+#endif
+#elif defined(_MSC_VER) && (defined(_WIN64) || defined(_M_HYBRID_CHPE_ARM64))
+#if defined(_M_X64)
+#ifdef RAPIDHASH_PROTECTED
+    uint64_t a, b;
+    a=_umul128(*A,*B,&b);
+    *A^=a;  *B^=b;
+#else
+    *A=_umul128(*A,*B,B);
+#endif
+#else
+#ifdef RAPIDHASH_PROTECTED
+    uint64_t a, b;
+    b = __umulh(*A, *B);
+    a = *A * *B;
+    *A^=a;  *B^=b;
+#else
+    uint64_t c = __umulh(*A, *B);
+    *A = *A * *B;
+    *B = c;
+#endif
+#endif
+#else
+    uint64_t ha=*A>>32, hb=*B>>32, la=(uint32_t)*A, lb=(uint32_t)*B, hi, lo;
+    uint64_t rh=ha*hb, rm0=ha*lb, rm1=hb*la, rl=la*lb, t=rl+(rm0<<32), c=t<rl;
+    lo=t+(rm1<<32); c+=lo<t; hi=rh+(rm0>>32)+(rm1>>32)+c;
+#ifdef RAPIDHASH_PROTECTED
+    *A^=lo;  *B^=hi;
+#else
+    *A=lo;  *B=hi;
+#endif
+#endif
+}
+
+RAPIDHASH_INLINE uint64_t rapid_mix(uint64_t A, uint64_t B) RAPIDHASH_NOEXCEPT { rapid_mum(&A,&B); return A^B; }
+
+#ifdef RAPIDHASH_LITTLE_ENDIAN
+RAPIDHASH_INLINE uint64_t rapid_read64(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return v;}
+RAPIDHASH_INLINE uint64_t rapid_read32(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint32_t v; memcpy(&v, p, sizeof(uint32_t)); return v;}
+#elif defined(__GNUC__) || defined(__INTEL_COMPILER) || defined(__clang__)
+RAPIDHASH_INLINE uint64_t rapid_read64(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return __builtin_bswap64(v);}
+RAPIDHASH_INLINE uint64_t rapid_read32(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint32_t v; memcpy(&v, p, sizeof(uint32_t)); return __builtin_bswap32(v);}
+#elif defined(_MSC_VER)
+RAPIDHASH_INLINE uint64_t rapid_read64(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint64_t v; memcpy(&v, p, sizeof(uint64_t)); return _byteswap_uint64(v);}
+RAPIDHASH_INLINE uint64_t rapid_read32(const uint8_t *p) RAPIDHASH_NOEXCEPT { uint32_t v; memcpy(&v, p, sizeof(uint32_t)); return _byteswap_ulong(v);}
+#else
+RAPIDHASH_INLINE uint64_t rapid_read64(const uint8_t *p) RAPIDHASH_NOEXCEPT {
+    uint64_t v; memcpy(&v, p, 8);
+    return (((v >> 56) & 0xff)| ((v >> 40) & 0xff00)| ((v >> 24) & 0xff0000)| ((v >>  8) & 0xff000000)| ((v <<  8) & 0xff00000000)| ((v << 24) & 0xff0000000000)| ((v << 40) & 0xff000000000000)| ((v << 56) & 0xff00000000000000));
+}
+RAPIDHASH_INLINE uint64_t rapid_read32(const uint8_t *p) RAPIDHASH_NOEXCEPT {
+    uint32_t v; memcpy(&v, p, 4);
+    return (((v >> 24) & 0xff)| ((v >>  8) & 0xff00)| ((v <<  8) & 0xff0000)| ((v << 24) & 0xff000000));
+}
+#endif
+
+RAPIDHASH_INLINE uint64_t rapid_readSmall(const uint8_t *p, size_t k) RAPIDHASH_NOEXCEPT { return (((uint64_t)p[0])<<56)|(((uint64_t)p[k>>1])<<32)|p[k-1];}
+
+RAPIDHASH_INLINE uint64_t rapidhash_internal(const void *key, size_t len, uint64_t seed, const uint64_t* secret) RAPIDHASH_NOEXCEPT {
+    const uint8_t *p=(const uint8_t *)key; seed^=rapid_mix(seed^secret[0],secret[1])^len;  uint64_t  a,  b;
+    if(_likely_(len<=16)){
+        if(_likely_(len>=4)){
+            const uint8_t * plast = p + len - 4;
+            a = (rapid_read32(p) << 32) | rapid_read32(plast);
+            const uint64_t delta = ((len&24)>>(len>>3));
+            b = ((rapid_read32(p + delta) << 32) | rapid_read32(plast - delta)); }
+        else if(_likely_(len>0)){ a=rapid_readSmall(p,len); b=0;}
+        else a=b=0;
+    }
+    else{
+        size_t i=len;
+        if(_unlikely_(i>48)){
+            uint64_t see1=seed, see2=seed;
+#ifdef RAPIDHASH_UNROLLED
+            while(_likely_(i>=96)){
+                seed=rapid_mix(rapid_read64(p)^secret[0],rapid_read64(p+8)^seed);
+                see1=rapid_mix(rapid_read64(p+16)^secret[1],rapid_read64(p+24)^see1);
+                see2=rapid_mix(rapid_read64(p+32)^secret[2],rapid_read64(p+40)^see2);
+                seed=rapid_mix(rapid_read64(p+48)^secret[0],rapid_read64(p+56)^seed);
+                see1=rapid_mix(rapid_read64(p+64)^secret[1],rapid_read64(p+72)^see1);
+                see2=rapid_mix(rapid_read64(p+80)^secret[2],rapid_read64(p+88)^see2);
+                p+=96; i-=96;
+            }
+            if(_unlikely_(i>=48)){
+                seed=rapid_mix(rapid_read64(p)^secret[0],rapid_read64(p+8)^seed);
+                see1=rapid_mix(rapid_read64(p+16)^secret[1],rapid_read64(p+24)^see1);
+                see2=rapid_mix(rapid_read64(p+32)^secret[2],rapid_read64(p+40)^see2);
+                p+=48; i-=48;
+            }
+#else
+            do {
+                seed=rapid_mix(rapid_read64(p)^secret[0],rapid_read64(p+8)^seed);
+                see1=rapid_mix(rapid_read64(p+16)^secret[1],rapid_read64(p+24)^see1);
+                see2=rapid_mix(rapid_read64(p+32)^secret[2],rapid_read64(p+40)^see2);
+                p+=48; i-=48;
+            } while (_likely_(i>=48));
+#endif
+            seed^=see1^see2;
+        }
+        if(i>16){
+            seed=rapid_mix(rapid_read64(p)^secret[2],rapid_read64(p+8)^seed^secret[1]);
+            if(i>32)
+                seed=rapid_mix(rapid_read64(p+16)^secret[2],rapid_read64(p+24)^seed);
+        }
+        a=rapid_read64(p+i-16);  b=rapid_read64(p+i-8);
+    }
+    a^=secret[1]; b^=seed;  rapid_mum(&a,&b);
+    return  rapid_mix(a^secret[0]^len,b^secret[1]);
+}
+
+RAPIDHASH_INLINE uint64_t rapidhash_withSeed(const void *key, size_t len, uint64_t seed) RAPIDHASH_NOEXCEPT {
+    return rapidhash_internal(key, len, seed, rapid_secret);
+}
+
+uint64_t rapidhash(const void *key, size_t len) RAPIDHASH_NOEXCEPT {
+    return rapidhash_withSeed(key, len, RAPID_SEED);
 }
 
 #endif // SOL_DEF
