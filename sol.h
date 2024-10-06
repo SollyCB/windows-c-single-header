@@ -67,8 +67,10 @@ enum type {
 };
 
 // pp.h
-#define pp_join(a, b) a ## b
-#define pp_struct(name) struct name
+#define paste(...) __VA_ARGS__
+
+#define def_wrapper_fn(wrapper_name, wrapped_name, ret_type, wrapper_args, wrapped_args) \
+static inline ret_type wrapper_name(wrapper_args) { return (ret_type)wrapped_name(wrapped_args); }
 
 // os.h
 extern struct os {
@@ -463,6 +465,81 @@ struct string {
 typedef struct dict dict_t;
 typedef struct dict_iter dict_iter_t;
 
+//
+// def_typed_dict(abbrev, val_type):
+// 
+// struct abbrev_dict_kv {
+//     u64 key;
+//     val_type val;
+// };
+//
+// typedef struct abbrev_dict abbrev_dict_t
+// typedef struct abbrev_dict_iter abbrev_dict_iter_t
+// 
+// int create_dict(u64 size, allocator_t *alloc, dict_t *dict)
+// struct abbrev_dict_kv* dict_insert(abbrev_dict_t *dict, struct string key, val_type *val)
+// struct abbrev_dict_kv* dict_find(abbrev_dict_t *dict, struct string key)
+// int dict_remove(dict_t *dict, struct string key)
+// void dict_get_iter(dict_t *dict, struct string key)
+// struct abbrev_dict_kv* dict_iter_next(abbrev_dict_t *dict, abbrev_dict_iter_t *iter)
+// void destroy_dict(abbrev_dict_iter_t *iter)
+//
+// struct thing {
+//     u32 i;
+//     char *s;
+// };
+// 
+// def_typed_dict(thing, struct thing)
+// 
+// void func(u32 size, allocator *alloc, u32 count, struct string *keys, struct thing *things)
+// {
+//     thing_dict_t dict;
+//     if (create_dict(size, alloc, &dict))
+//         error;
+// 
+//     for(u32 i=0; i < count; ++i) {
+//         struct thing_dict_kv *kv = thing_dict_insert(&dict, keys[i], &things[i]);
+//         if (!kv)
+//             insertion error;
+//     }
+// 
+//     for(u32 i=0; i < count; ++i) {
+//         struct thing_dict_kv *kv = thing_dict_find(&dict, keys[i]);
+//         if (!kv)
+//             doesn't exist;
+//     }
+// 
+//     thing_dict_iter_t iter;
+//     thing_dict_get_iter(&dict, &iter);
+// 
+//     struct thing_dict_kv *kv;
+//     dict_for_each(kv, &iter, thing_dict_iter_next) {
+//     println("key %u, thing.s %s", kv->key, kv->val.s)
+//     }
+// }
+//
+
+#define create_typed_dict_args(dict_type) u64 size, allocator_t *alloc, dict_type *dict
+#define create_typed_dict_ret() int
+
+#define typed_dict_insert_args(dict_type, value_type) dict_type *dict, struct string key, value_type *val
+#define typed_dict_insert_ret(dict_kv_type) dict_kv_type*
+
+#define typed_dict_find_args(dict_type) dict_type *dict, struct string key
+#define typed_dict_find_ret(dict_kv_type) dict_kv_type*
+
+#define typed_dict_remove_args(dict_type) dict_type *dict, struct string key
+#define typed_dict_remove_ret() int
+
+#define typed_dict_get_iter_args(dict_type, dict_iter_type) dict_type *dict, dict_iter_type *iter
+#define typed_dict_get_iter_ret() void
+
+#define typed_dict_iter_next_args(dict_iter_type) dict_iter_type *iter
+#define typed_dict_iter_next_ret(dict_kv_type) dict_kv_type*
+
+#define typed_dict_destroy_args(dict_type) dict_type *dict
+#define typed_dict_destroy_ret() void
+
 #define def_create_dict(name) int name(u64 size, u64 stride, allocator_t *alloc, dict_t *dict)
 #define def_dict_insert(name) void* dict_insert(dict_t *dict, struct string key, void *val, u64 stride)
 #define def_dict_find(name) void* dict_find(dict_t *dict, struct string key, u64 stride)
@@ -507,45 +584,15 @@ u32 pos; \
 
 #define def_typed_dict(abbrev, value) \
 def_dict_kv(abbrev ## _dict_kv, typeof(value)) \
-def_dict(abbrev ## _dict, pp_struct(abbrev ## _dict_kv)) \
+def_dict(abbrev ## _dict, struct abbrev ## _dict_kv) \
 def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t) \
-\
-static inline void \
-create_ ## abbrev ## _dict(u64 size, allocator_t *alloc, abbrev ## _dict_t *dict) \
-{ \
-create_dict(size, sizeof(*dict->data), alloc, (dict_t*)dict); \
-} \
-static inline struct abbrev ## _dict_kv* \
-abbrev ## _dict_insert(abbrev ## _dict_t *dict, struct string key, typeof(value) *val) \
-{ \
-return (struct abbrev ## _dict_kv*)dict_insert((dict_t*)dict, key, val, sizeof(*dict->data)); \
-} \
-\
-static inline struct abbrev ## _dict_kv* \
-abbrev ## _dict_find(abbrev ## _dict_t *dict, struct string key) \
-{ \
-return (struct abbrev ## _dict_kv*)dict_find((dict_t*)dict, key, sizeof(*dict->data)); \
-} \
-\
-static inline bool abbrev ## _dict_remove(abbrev ## _dict_t *dict, struct string key) \
-{ \
-return dict_remove((dict_t*)dict, key, sizeof(*dict->data)); \
-} \
-\
-static inline void abbrev ## _dict_get_iter(abbrev ## _dict_t *dict, abbrev ## _dict_iter_t *iter) \
-{ \
-dict_get_iter((dict_t*)dict, (dict_iter_t*)iter); \
-} \
-\
-static inline struct abbrev ## _dict_kv* \
-abbrev ## _dict_iter_next(abbrev ## _dict_iter_t *iter) \
-{ \
-return (struct abbrev ## _dict_kv*)dict_iter_next((dict_iter_t*)iter, sizeof(*iter->dict->data)); \
-} \
-static inline void destroy_ ## abbrev ## _dict(abbrev ## _dict_t *dict) \
-{ \
-destroy_dict((dict_t*)dict, sizeof(*dict->data)); \
-}
+def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, sizeof(*dict->data), alloc, (dict_t*)dict)) \
+def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(struct abbrev ## _dict_kv), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data))) \
+def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(struct abbrev ## _dict_kv), typed_dict_find_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
+def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(), typed_dict_remove_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
+def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(), typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t), paste((dict_t*)dict, (dict_iter_t*)iter)) \
+def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(struct abbrev ## _dict_kv), typed_dict_iter_next_args(abbrev ## _dict_iter_t), paste((dict_iter_t*)iter, sizeof(*iter->dict->data))) \
+def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(), typed_dict_destroy_args(abbrev ## _dict_t), paste((dict_t*)dict, sizeof(*dict->data)))
 
 #ifdef SOL_DEF
 
