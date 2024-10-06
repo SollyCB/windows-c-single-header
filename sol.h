@@ -7,11 +7,14 @@
 #include <stdarg.h>
 #include <string.h>
 #include <intrin.h>
+#include <assert.h>
 #include <windows.h>
 
 #define SCB_OVERRIDE_STDLIB
 
 #ifdef SCB_OVERRIDE_STDLIB
+#undef assert
+#define assert scb_assert
 #define snprintf scb_snprintf
 #endif
 
@@ -66,7 +69,7 @@ enum type {
     TYPE_ARENA,
 };
 
-// pp.h
+// preproc.h
 #define paste(...) __VA_ARGS__
 
 #define def_wrapper_fn(wrapper_name, wrapped_name, ret_type, wrapper_args, wrapped_args) \
@@ -153,7 +156,7 @@ write_stdout(m__println_buf, m__println_size); \
 } while(0);
 
 // assert.h
-#define assert(x) \
+#define scb_assert(x) \
 if (!(x)) { \
 println("[%s, %s, %u] ASSERT : %s", __FILE__, __FUNCTION__, __LINE__, #x); \
 __debugbreak(); \
@@ -161,7 +164,7 @@ __debugbreak(); \
 
 #define log_break \
 do { \
-_mm_sfence(); \
+_mm_mfence(); \
 __debugbreak(); \
 } while(0);
 
@@ -201,7 +204,7 @@ static inline bool is_pow2(u64 x)
 
 static inline u64 mod_pow2(u64 l, u64 r)
 {
-    assert(is_pow2(r));
+    log_error_if(!is_pow2(r), "Trying to align to a value which is not a power of 2");
     return l & (r - 1);
 }
 
@@ -213,7 +216,7 @@ static inline u64 next_pow2(u64 x) // TODO(SollyCB): There must be a better impl
 }
 
 static inline u64 align(u64 size, u64 alignment) {
-    assert(is_pow2(alignment));
+    log_error_if(!is_pow2(alignment), "Trying to align to a value which is not a power of 2");
     u64 alignment_mask = alignment - 1;
     return (size + alignment_mask) & ~alignment_mask;
 }
@@ -455,6 +458,26 @@ static inline def_destroy_allocator(destroy_allocator, allocator)
     }
 }
 
+// array.h
+#define typed_array(abbrev, type) \
+typedef typeof(type)* abbrev ## _array_t;
+
+#define def_create_array(name) name(u64 size, allocator_t *alloc, 
+
+#if 0
+append()	Adds an element at the end of the list
+clear()	Removes all the elements from the list
+copy()	Returns a copy of the list
+count()	Returns the number of elements with the specified value
+extend()	Add the elements of a list (or any iterable), to the end of the current list
+index()	Returns the index of the first element with the specified value
+insert()	Adds an element at the specified position
+pop()	Removes the element at the specified position
+remove()	Removes the first item with the specified value
+reverse()	Reverses the order of the list
+sort()	Sorts the list
+#endif
+
 // string.h
 struct string {
     u64 size;
@@ -475,7 +498,7 @@ typedef struct dict_iter dict_iter_t;
 //
 // typedef struct abbrev_dict abbrev_dict_t
 // typedef struct abbrev_dict_iter abbrev_dict_iter_t
-// 
+//
 // int create_dict(u64 size, allocator_t *alloc, dict_t *dict)
 // struct abbrev_dict_kv* dict_insert(abbrev_dict_t *dict, struct string key, val_type *val)
 // struct abbrev_dict_kv* dict_find(abbrev_dict_t *dict, struct string key)
@@ -488,34 +511,36 @@ typedef struct dict_iter dict_iter_t;
 //     u32 i;
 //     char *s;
 // };
-// 
+//
 // def_typed_dict(thing, struct thing)
-// 
+//
 // void func(u32 size, allocator *alloc, u32 count, struct string *keys, struct thing *things)
 // {
 //     thing_dict_t dict;
 //     if (create_dict(size, alloc, &dict))
 //         error;
-// 
+//
 //     for(u32 i=0; i < count; ++i) {
 //         struct thing_dict_kv *kv = thing_dict_insert(&dict, keys[i], &things[i]);
 //         if (!kv)
 //             insertion error;
 //     }
-// 
+//
 //     for(u32 i=0; i < count; ++i) {
 //         struct thing_dict_kv *kv = thing_dict_find(&dict, keys[i]);
 //         if (!kv)
 //             doesn't exist;
 //     }
-// 
+//
 //     thing_dict_iter_t iter;
 //     thing_dict_get_iter(&dict, &iter);
 // 
 //     struct thing_dict_kv *kv;
 //     dict_for_each(kv, &iter, thing_dict_iter_next) {
-//     println("key %u, thing.s %s", kv->key, kv->val.s)
+//         println("key %u, thing.s %s", kv->key, kv->val.s)
 //     }
+// 
+//     destroy_thing_dict(&dict);
 // }
 //
 
@@ -523,29 +548,29 @@ typedef struct dict_iter dict_iter_t;
 #define create_typed_dict_ret() int
 
 #define typed_dict_insert_args(dict_type, value_type) dict_type *dict, struct string key, value_type *val
-#define typed_dict_insert_ret(dict_kv_type) dict_kv_type*
+#define typed_dict_insert_ret() int
 
-#define typed_dict_find_args(dict_type) dict_type *dict, struct string key
-#define typed_dict_find_ret(dict_kv_type) dict_kv_type*
+#define typed_dict_find_args(dict_type, ret_type) dict_type *dict, struct string key, ret_type *ret
+#define typed_dict_find_ret() bool
 
 #define typed_dict_remove_args(dict_type) dict_type *dict, struct string key
-#define typed_dict_remove_ret() int
+#define typed_dict_remove_ret() bool
 
 #define typed_dict_get_iter_args(dict_type, dict_iter_type) dict_type *dict, dict_iter_type *iter
 #define typed_dict_get_iter_ret() void
 
-#define typed_dict_iter_next_args(dict_iter_type) dict_iter_type *iter
-#define typed_dict_iter_next_ret(dict_kv_type) dict_kv_type*
+#define typed_dict_iter_next_args(dict_iter_type, ret_type) dict_iter_type *iter, ret_type *ret
+#define typed_dict_iter_next_ret() bool
 
 #define typed_dict_destroy_args(dict_type) dict_type *dict
 #define typed_dict_destroy_ret() void
 
 #define def_create_dict(name) int name(u64 size, u64 stride, allocator_t *alloc, dict_t *dict)
-#define def_dict_insert(name) void* dict_insert(dict_t *dict, struct string key, void *val, u64 stride)
-#define def_dict_find(name) void* dict_find(dict_t *dict, struct string key, u64 stride)
+#define def_dict_insert(name) int dict_insert(dict_t *dict, struct string key, void *val, u64 stride)
+#define def_dict_find(name) bool dict_find(dict_t *dict, struct string key, u64 stride, void *ret)
 #define def_dict_remove(name) bool dict_remove(dict_t *dict, struct string key, u64 stride)
 #define def_dict_get_iter(name) void dict_get_iter(dict_t *dict, dict_iter_t *iter)
-#define def_dict_iter_next(name) void* dict_iter_next(dict_iter_t *iter, u64 stride)
+#define def_dict_iter_next(name) bool dict_iter_next(dict_iter_t *iter, u64 stride, void *ret)
 #define def_destroy_dict(name) void destroy_dict(dict_t *dict, u64 stride)
 
 def_create_dict(create_dict);
@@ -560,7 +585,7 @@ def_destroy_dict(destroy_dict);
 def_get_dict_key(get_dict_key);
 
 #define dict_for_each(kv, dict_iter, func) \
-for(kv = func(dict_iter); kv; kv = func(dict_iter))
+while(func(dict_iter, kv))
 
 #define def_dict_kv(name, type) \
 struct name { \
@@ -587,11 +612,11 @@ def_dict_kv(abbrev ## _dict_kv, typeof(value)) \
 def_dict(abbrev ## _dict, struct abbrev ## _dict_kv) \
 def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t) \
 def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, sizeof(*dict->data), alloc, (dict_t*)dict)) \
-def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(struct abbrev ## _dict_kv), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data))) \
-def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(struct abbrev ## _dict_kv), typed_dict_find_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
+def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data))) \
+def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(), typed_dict_find_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, sizeof(*dict->data), ret)) \
 def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(), typed_dict_remove_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
 def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(), typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t), paste((dict_t*)dict, (dict_iter_t*)iter)) \
-def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(struct abbrev ## _dict_kv), typed_dict_iter_next_args(abbrev ## _dict_iter_t), paste((dict_iter_t*)iter, sizeof(*iter->dict->data))) \
+def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(), typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)), paste((dict_iter_t*)iter, sizeof(*iter->dict->data), ret)) \
 def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(), typed_dict_destroy_args(abbrev ## _dict_t), paste((dict_t*)dict, sizeof(*dict->data)))
 
 #ifdef SOL_DEF
@@ -1121,14 +1146,15 @@ enum {
 };
 
 #define DICT_GROUP_SIZE 16
-
-#define dict_for_each_internal(dict_iter, kv, func, stride) \
-for(kv = func(dict_iter, stride); kv; kv = func(dict_iter, stride))
+#define DICT_HASH_SIZE 8
 
 #define dict_probe_loop(idx, probe) \
 for(idx = dict_probe_next(probe); idx != Max_u32; idx = dict_probe_next(probe))
 
-#define def_dict_insert_hash(name) static void* name(dict_t *dict, u64 key, void *val, u64 stride)
+#define dict_iter_for_each_internal(it, kv, stride, func) \
+for(kv = func(it, stride); kv; kv = func(it, stride))
+
+#define def_dict_insert_hash(name) static int name(dict_t *dict, u64 key, void *val, u64 stride)
 def_dict_insert_hash(dict_insert_hash);
 
 static inline u8 dict_top7(u64 key)
@@ -1193,14 +1219,31 @@ static u32 dict_probe_next(dict_probe_t *probe)
     return probe->pos;
 }
 
+static void* dict_iter_next_internal(dict_iter_t *iter, u64 stride)
+{
+    u32 i;
+    while(1) {
+        if (iter->pos >= iter->dict->cap)
+            return NULL;
+        
+        i = dict_next_full_slot(iter->dict, iter->pos);
+        if (i != Max_u32)
+            break;
+        
+        iter->pos = dict_next_group(iter->pos);
+    }
+    iter->pos = i + 1;
+    return iter->dict->data + iter->dict->cap + stride * i;
+}
+
 static int dict_copy(dict_t *new_dict, dict_t *old_dict, u64 stride)
 {
     dict_iter_t it;
     dict_get_iter(old_dict, &it);
     
     struct dict_kv *kv;
-    dict_for_each_internal(&it, kv, dict_iter_next, stride) {
-        if (!dict_insert_hash(new_dict, kv->key, &kv->val, stride))
+    dict_iter_for_each_internal(&it, kv, stride, dict_iter_next_internal) {
+        if (dict_insert_hash(new_dict, kv->key, &kv->val, stride))
             return -1;
     }
     return 0;
@@ -1252,7 +1295,7 @@ def_dict_insert_hash(dict_insert_hash)
         {
             log_error("Failed to initialize new dict on resize");
             *dict = old_dict;
-            return NULL;
+            return -1;
         }
         destroy_dict(&old_dict, stride);
     }
@@ -1271,14 +1314,14 @@ def_dict_insert_hash(dict_insert_hash)
             kv->key = key;
             
             void *v = &kv->val;
-            memcpy(v, val, stride - 8);
+            memcpy(v, val, stride - DICT_HASH_SIZE);
             
             dict->rem -= 1;
-            return kv;
+            return 0;
         }
     }
     log_error("Failed to find empty slot");
-    return NULL;
+    return -1;
 }
 
 def_get_dict_key(get_dict_key)
@@ -1294,7 +1337,11 @@ def_dict_insert(dict_insert)
 def_dict_find(dict_find)
 {
     u32 i = dict_find_hash(dict, rapidhash(key.data, key.size), stride);
-    return i == Max_u32 ? NULL : dict->data + dict->cap + stride * i;
+    if (i == Max_u32)
+        return false;
+    
+    memcpy(ret, dict->data + dict->cap + stride * i + DICT_HASH_SIZE, stride - DICT_HASH_SIZE);
+    return true;
 }
 
 def_dict_remove(dict_remove)
@@ -1320,7 +1367,7 @@ def_dict_iter_next(dict_iter_next)
     u32 i;
     while(1) {
         if (iter->pos >= iter->dict->cap)
-            return NULL;
+            return false;
         
         i = dict_next_full_slot(iter->dict, iter->pos);
         if (i != Max_u32)
@@ -1329,7 +1376,8 @@ def_dict_iter_next(dict_iter_next)
         iter->pos = dict_next_group(iter->pos);
     }
     iter->pos = i + 1;
-    return iter->dict->data + iter->dict->cap + stride * i;
+    memcpy(ret, iter->dict->data + iter->dict->cap + stride * i + DICT_HASH_SIZE, stride - DICT_HASH_SIZE);
+    return true;
 }
 
 def_destroy_dict(destroy_dict)
