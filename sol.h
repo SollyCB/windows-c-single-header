@@ -9,6 +9,12 @@
 #include <intrin.h>
 #include <windows.h>
 
+#define SCB_OVERRIDE_STDLIB
+
+#ifdef SCB_OVERRIDE_STDLIB
+#define snprintf scb_snprintf
+#endif
+
 typedef int8_t   s8;
 typedef int16_t  s16;
 typedef int32_t  s32;
@@ -17,6 +23,8 @@ typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef float f32;
+typedef double f64;
 
 #define Max_s8  0x7f
 #define Max_s16 0x7fff
@@ -124,7 +132,7 @@ def_write_file(write_file);
 def_read_file(read_file);
 
 // print.h
-#define def_snprintf(name) u32 name(char *buf, u32 len, const char *fmt, ...)
+#define def_snprintf(name) u32 name(char *buf, u32 size, const char *fmt, ...)
 def_snprintf(scb_snprintf);
 
 #define print(fmt, ...) \
@@ -664,7 +672,9 @@ enum {
     PR_Z = 0x80,
 };
 
-static u32 pr_parse_u(char *buf, u64 x, u32 f)
+#define def_pr_parse(name, type) static u32 name(char *buf, u32 size, type x, u32 f)
+
+def_pr_parse(pr_parse_u, u64)
 {
     u32 bp = 0;
     u32 zc = 0;
@@ -704,38 +714,47 @@ static u32 pr_parse_u(char *buf, u64 x, u32 f)
         tmp[bp++] = f & PR_H ? 'x' : 'b';
         tmp[bp++] = '0';
     }
+    u32 ti = bp;
+    if (bp > size)
+        bp = size;
     for(u32 i=0; i < bp; ++i)
-        buf[i] = tmp[bp-1-i];
+        buf[i] = tmp[ti-1-i];
     return bp;
 }
 
-static u32 pr_parse_i(char *buf, s64 x, u32 f)
+def_pr_parse(pr_parse_i, s64)
 {
     u32 bp = 0;
     if (x < 0) {
+        if (size == 0)
+            return 0;
         buf[bp++] = '-';
         x *= -1;
     }
-    bp += pr_parse_u(buf + bp, x, f);
+    bp += pr_parse_u(buf + bp, size, x, f);
     return bp;
 }
 
-static u32 pr_parse_s(char *buf, char *x, u32 f)
+def_pr_parse(pr_parse_s, char*)
 {
     u32 bp = (u32)strlen(x);
+    if (bp > size)
+        bp = size;
     memcpy(buf, x, bp);
     return bp;
 }
 
-static u32 pr_parse_f(char *buf, double x, u32 f)
+def_pr_parse(pr_parse_f, f64)
 {
     // TODO(SollyCB): Idk if I will ever get round to implementing this myself...
-    u32 bp = sprintf(buf, "%f", x);
+    u32 bp = snprintf(buf, size, "%f", x);
     return bp;
 }
 
-static u32 pr_parse_c(char *buf, char x, u32 f)
+def_pr_parse(pr_parse_c, char)
 {
+    if (size == 0)
+        return 0;
     buf[0] = x;
     return 1;
 }
@@ -764,8 +783,7 @@ def_snprintf(scb_snprintf)
     u32 f = 0;
     u32 bp = 0;
     u32 sl = (u32)strlen(fmt);
-    
-    for(u32 i=0; i < sl; ++i) {
+    for(u32 i=0; i < sl && bp < size-1; ++i) {
         f = 0;
         switch(fmt[i]) {
             case '-': {
@@ -794,19 +812,19 @@ def_snprintf(scb_snprintf)
         }
         if (f & PR_I) {
             s64 x = va_arg(va, s64);
-            bp += pr_parse_i(buf + bp, x, f);
+            bp += pr_parse_i(buf + bp, size - bp - 1, x, f);
         } else if (f & PR_U) {
             u64 x = va_arg(va, u64);
-            bp += pr_parse_u(buf + bp, x, f);
+            bp += pr_parse_u(buf + bp, size - bp - 1, x, f);
         } else if (f & PR_S) {
             char *x = va_arg(va, char*);
-            bp += pr_parse_s(buf + bp, x, f);
+            bp += pr_parse_s(buf + bp, size - bp - 1, x, f);
         } else if (f & PR_F) {
             double x = va_arg(va, double);
-            bp += pr_parse_f(buf + bp, x, f);
+            bp += pr_parse_f(buf + bp, size - bp - 1, x, f);
         } else if (f & PR_C) {
             char x = va_arg(va, char);
-            bp += pr_parse_c(buf + bp, x, f);
+            bp += pr_parse_c(buf + bp, size - bp - 1, x, f);
         }
     }
     va_end(va);
