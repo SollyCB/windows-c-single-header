@@ -54,7 +54,7 @@ typedef double f64;
 #define typeof(x) __typeof__(x)
 #define maxif(x) (0UL - (bool)(x))
 #define cl_align(x) __declspec(align(x))
-#define cl_array_len(x) (sizeof(x)/sizeof(x[0]))
+#define cl_array_size(x) (sizeof(x)/sizeof(x[0]))
 
 #define memb_to_struct(memb, memb_of, memb_name) \
 ((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
@@ -459,24 +459,27 @@ static inline def_destroy_allocator(destroy_allocator, allocator)
 }
 
 // array.h
-#define typed_array(abbrev, type) \
-typedef typeof(type)* abbrev ## _array_t;
+#define def_create_array_args(type) u64 size, allocator_t *alloc, type *array
+#define def_array_add_args(type, elem_type) type *array, elem_type *elem
+#define def_destroy_array_args(type) type *array
 
-#define def_create_array(name) name(u64 size, allocator_t *alloc, 
+#define def_create_array_ret int
+#define def_array_add_ret int
+#define def_destroy_array_ret void
 
-#if 0
-append()	Adds an element at the end of the list
-clear()	Removes all the elements from the list
-copy()	Returns a copy of the list
-count()	Returns the number of elements with the specified value
-extend()	Add the elements of a list (or any iterable), to the end of the current list
-index()	Returns the index of the first element with the specified value
-insert()	Adds an element at the specified position
-pop()	Removes the element at the specified position
-remove()	Removes the first item with the specified value
-reverse()	Reverses the order of the list
-sort()	Sorts the list
-#endif
+#define def_typed_array(abbrev, type) \
+typedef typeof(type)* abbrev ## _array_t; \
+def_wrapper_fn(create_ ## abbrev ## _array, create_array, def_create_array_ret, def_create_array_args(abbrev ## _array_t), paste(size, alloc, array, sizeof(**array))) \
+def_wrapper_fn(abbrev ## _array_add, array_add, def_array_add_ret, def_array_add_args(abbrev ## _array_t, type), paste(array, elem, sizeof(**array))) \
+def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_ret, def_destroy_array_args(abbrev ## _array_t), paste(array, sizeof(**array)))
+
+#define def_create_array(name) def_create_array_ret name(def_create_array_args(void*), u64 stride)
+#define def_array_add(name) def_array_add_ret name(def_array_add_args(void*, void), u64 stride)
+#define def_destroy_array(name) def_destroy_array_ret name(def_destroy_array_args(void*), u64 stride)
+
+def_create_array(create_array);
+def_array_add(array_add);
+def_destroy_array(destroy_array);
 
 // string.h
 struct string {
@@ -500,11 +503,11 @@ typedef struct dict_iter dict_iter_t;
 // typedef struct abbrev_dict_iter abbrev_dict_iter_t
 //
 // int create_dict(u64 size, allocator_t *alloc, dict_t *dict)
-// struct abbrev_dict_kv* dict_insert(abbrev_dict_t *dict, struct string key, val_type *val)
-// struct abbrev_dict_kv* dict_find(abbrev_dict_t *dict, struct string key)
-// int dict_remove(dict_t *dict, struct string key)
+// int dict_insert(abbrev_dict_t *dict, struct string key, val_type *val)
+// bool dict_find(abbrev_dict_t *dict, struct string key, val_type *ret)
+// bool dict_remove(dict_t *dict, struct string key)
 // void dict_get_iter(dict_t *dict, struct string key)
-// struct abbrev_dict_kv* dict_iter_next(abbrev_dict_t *dict, abbrev_dict_iter_t *iter)
+// bool dict_iter_next(abbrev_dict_t *dict, abbrev_dict_iter_t *iter, val_type *ret)
 // void destroy_dict(abbrev_dict_iter_t *iter)
 //
 // struct thing {
@@ -521,14 +524,13 @@ typedef struct dict_iter dict_iter_t;
 //         error;
 //
 //     for(u32 i=0; i < count; ++i) {
-//         struct thing_dict_kv *kv = thing_dict_insert(&dict, keys[i], &things[i]);
-//         if (!kv)
+//         if (thing_dict_insert(&dict, keys[i], &things[i]))
 //             insertion error;
 //     }
 //
 //     for(u32 i=0; i < count; ++i) {
-//         struct thing_dict_kv *kv = thing_dict_find(&dict, keys[i]);
-//         if (!kv)
+//         struct thing r;
+//         if (!thing_dict_find(&dict, keys[i], &r))
 //             doesn't exist;
 //     }
 //
@@ -927,24 +929,28 @@ static inline bool arena_header_is_valid(struct arena_header *header)
 
 static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
 {
-    if (size < alloc->min_block_size)
-        size = alloc->min_block_size;
+    u64 block_size = align(size + ARENA_HEADER_SIZE, os_page_size());
+    if (block_size < alloc->min_block_size)
+        block_size = alloc->min_block_size;
     
-    u8 *mem = os_allocate(size + ARENA_HEADER_SIZE);
-    if (!mem)
+    void *p = os_allocate(block_size);
+    if (!p)
         return NULL;
     
-    struct arena_header *block = (struct arena_header*)(mem + size);
-    memset(block, 0, sizeof(*block));
+    struct arena_header *block = p;
+    void *mem = block + 1;
     
+    memset(block, 0, sizeof(*block));
     block->validation_bits = ARENA_VALIDATION_BITS;
-    create_linear(mem, size, &block->linear);
+    create_linear(mem, block_size - ARENA_HEADER_SIZE, &block->linear);
+    
     alloc->block_count += 1;
     return block;
 }
 
 static void destroy_arena_block(arena_t *alloc, struct arena_header *block)
 {
+    list_remove(&block->list);
     os_deallocate(block->linear.data, block->linear.size + ARENA_HEADER_SIZE);
     alloc->block_count -= alloc->block_count > 0;
 }
@@ -966,8 +972,10 @@ struct arena_header* arena_find_block(arena_t *alloc, void *p)
 static void* arena_header_allocate(struct arena_header *block, u64 size)
 {
     log_error_if(!arena_header_is_valid(block), "Failed to validate arena header");
-    rc_inc(&block->rc);
-    return linear_allocate(&block->linear, size);
+    void *p = linear_allocate(&block->linear, size);
+    if (p)
+        rc_inc(&block->rc);
+    return p;
 }
 
 static void arena_header_deallocate(arena_t *alloc, struct arena_header *block, void *p, u64 size)
@@ -999,7 +1007,7 @@ def_create_allocator(create_linear, linear)
 def_allocate(linear_allocate, linear)
 {
     size = alloc_align(size);
-    if (alloc->used + size > alloc->size)
+    if (alloc->size < alloc->used + size)
         return NULL;
     
     alloc->used += size;
@@ -1009,15 +1017,20 @@ def_allocate(linear_allocate, linear)
 def_reallocate(linear_reallocate, linear)
 {
     if (linear_is_top(alloc, old_p, old_size)) {
+        if (alloc->size < alloc->used - alloc_align(old_size) + alloc_align(new_size))
+            return NULL;
         alloc->used -= alloc_align(old_size);
         alloc->used += alloc_align(new_size);
         return alloc->data + alloc->used - alloc_align(new_size);
     }
+    
     if (new_size < old_size)
         return old_p;
     
     void *p = linear_allocate(alloc, new_size);
-    memcpy(p, old_p, old_size);
+    if (p)
+        memcpy(p, old_p, old_size);
+    
     return p;
 }
 
@@ -1055,6 +1068,8 @@ def_create_allocator(create_arena, arena)
 
 def_allocate(arena_allocate, arena)
 {
+    size = alloc_align(size);
+    
     struct arena_header *block;
     u32 count = alloc->block_count;
     
@@ -1083,9 +1098,11 @@ def_reallocate(arena_reallocate, arena)
             return p;
     }
     
-    arena_header_deallocate(alloc, block, old_p, old_size);
     p = arena_allocate(alloc, new_size);
-    memcpy(p, old_p, old_size);
+    if (p) {
+        memcpy(p, old_p, old_size);
+        arena_header_deallocate(alloc, block, old_p, old_size);
+    }
     return p;
 }
 
@@ -1126,6 +1143,66 @@ def_destroy_allocator(destroy_arena, arena)
         list_remove(&block->list);
         destroy_arena_block(alloc, block);
     }
+}
+
+// array.c
+typedef struct array {
+    u64 size;
+    u64 used;
+    void *data;
+    allocator_t *alloc;
+} array_t;
+
+#define ARRAY_MIN_SIZE 16
+
+def_create_array(create_array)
+{
+    if (size < ARRAY_MIN_SIZE)
+        size = ARRAY_MIN_SIZE;
+    
+    array_t *tmp = allocate(alloc, size * stride + sizeof(*tmp));
+    if (!tmp) {
+        log_error("Failed to allocate memory for tmp");
+        return -1;
+    }
+    
+    tmp->used = 0;
+    tmp->size = size;
+    tmp->data = tmp + 1;
+    tmp->alloc = alloc;
+    *array = tmp->data;
+    
+    return 0;
+}
+
+def_array_add(array_add)
+{
+    array_t *tmp = ((array_t*) *array) - 1;
+    log_error_if(tmp->used > tmp->size, "Array overflowed");
+    
+    if (tmp->used == tmp->size) {
+        array_t old = *tmp;
+        tmp = reallocate(tmp->alloc, tmp, sizeof(*tmp) + tmp->size * stride,
+                         sizeof(*tmp) + tmp->size * stride * 2);
+        if (!tmp) {
+            log_error("Failed to reallocate array");
+            return -1;
+        }
+        tmp->data = tmp + 1;
+        tmp->size = old.size * 2;
+        *array = tmp->data;
+    }
+    
+    memcpy((u8*)tmp->data + tmp->used * stride, elem, stride);
+    tmp->used += 1;
+    return 0;
+}
+
+def_destroy_array(destroy_array)
+{
+    array_t *tmp = ((array_t*) *array) - 1;
+    deallocate(tmp->alloc, tmp, sizeof(*tmp) + tmp->size * stride);
+    *array = NULL;
 }
 
 // dict.c
