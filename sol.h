@@ -458,6 +458,50 @@ static inline def_destroy_allocator(destroy_allocator, allocator)
     }
 }
 
+// string.h
+struct string {
+    u64 size;
+    char *data;
+};
+
+typedef struct string_buffer {
+    u64 size;
+    u64 used;
+    char *data;
+} string_buffer_t;
+
+typedef struct string_array {
+    u32 size;
+    u32 used;
+    
+    struct {
+        u64 offset;
+        u64 size;
+    } *ranges;
+    
+    string_buffer_t buf;
+    allocator_t *alloc;
+} string_array_t;
+
+#define def_get_string_buffer(name) void name(char *buf, u64 size, string_buffer_t *ret)
+#define def_string_buffer_add(name) int name(string_buffer_t *strbuf, struct string str, struct string *ret)
+#define def_string_buffer_add_all(name) int name(string_buffer_t *strbuf, struct string str, struct string *ret)
+
+#define def_create_string_array(name) int name(u64 buf_size, u32 arr_size, allocator_t *alloc, string_array_t *ret)
+#define def_string_array_add(name) int name(string_array_t *strarr, struct string str)
+#define def_string_array_get(name) int name(string_array_t *strarr, u32 i, struct string *ret)
+#define def_string_array_get_raw(name) struct string name(string_array_t *strarr, u32 i)
+#define def_destroy_string_array(name) void name(string_array_t *strarr)
+
+def_get_string_buffer(create_string_buffer);
+def_string_buffer_add(string_buffer_add);
+
+def_create_string_array(create_string_array);
+def_string_array_add(string_array_add);
+def_string_array_get(string_array_get);
+def_string_array_get_raw(string_array_get_raw);
+def_destroy_string_array(destroy_string_array);
+
 // array.h
 #define def_create_array_args(type) u64 size, allocator_t *alloc, type *array
 #define def_array_add_args(type, elem_type) type *array, elem_type *elem
@@ -480,12 +524,6 @@ def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_re
 def_create_array(create_array);
 def_array_add(array_add);
 def_destroy_array(destroy_array);
-
-// string.h
-struct string {
-    u64 size;
-    char *data;
-};
 
 // dict.h
 typedef struct dict dict_t;
@@ -914,6 +952,8 @@ struct arena_header {
     rc_t rc;
 };
 
+// TODO(SollyCB): READ THROUGH THE ARENA ALLOCATOR FUNCTIONS!!! I ran into problems with them
+// before as I had clearly rushed the implementations.
 #define ARENA_HEADER_SIZE align(sizeof(struct arena_header), 16)
 #define ARENA_VALIDATION_BITS 0xcafebabecafebabe
 
@@ -1143,6 +1183,149 @@ def_destroy_allocator(destroy_arena, arena)
         list_remove(&block->list);
         destroy_arena_block(alloc, block);
     }
+}
+
+// string.c
+def_get_string_buffer(get_string_buffer)
+{
+    ret->data = buf;
+    ret->size = size;
+    ret->used = 0;
+}
+
+def_string_buffer_add(string_buffer_add)
+{
+    log_error_if(strbuf->size < strbuf->used, "string_buffer overflowed");
+    if (strbuf->size <= strbuf->used)
+        return -1;
+    
+    int res = 0;
+    if (strbuf->size < strbuf->used + str.size + 1) {
+        res = -1;
+        str.size = strbuf->size - strbuf->used - 1;
+    }
+    
+    ret->data = strbuf->data + strbuf->used;
+    ret->size = str.size;
+    strbuf->used += str.size + 1;
+    
+    memcpy(ret->data, str.data, ret->size);
+    ret->data[ret->size] = 0;
+    
+    return res;
+}
+
+def_string_buffer_add_all(string_buffer_add_all)
+{
+    log_error_if(strbuf->size < strbuf->used, "string_buffer overflowed");
+    
+    if (strbuf->size < strbuf->used + str.size + 1) {
+        memset(ret, 0, sizeof(*ret));
+        return -1;
+    }
+    
+    ret->data = strbuf->data + strbuf->used;
+    ret->size = str.size;
+    strbuf->used += str.size + 1;
+    
+    memcpy(ret->data, str.data, ret->size);
+    ret->data[ret->size] = 0;
+    
+    return 0;
+}
+
+def_create_string_array(create_string_array)
+{
+    char *buf = allocate(alloc, buf_size);
+    if (!buf) {
+        log_error("Failed to allocate memory for buffer");
+        return -1;
+    }
+    
+    ret->ranges = allocate(alloc, sizeof(*ret->ranges) * arr_size);
+    if (!ret->ranges) {
+        log_error("Failed to allocate memory for ranges array");
+        deallocate(alloc, buf, buf_size);
+        return -1;
+    }
+    
+    ret->size = arr_size;
+    ret->used = 0;
+    ret->alloc = alloc;
+    get_string_buffer(buf, buf_size, &ret->buf);
+    
+    return 0;
+}
+
+def_string_array_add(string_array_add)
+{
+    log_error_if(strarr->size < strarr->used, "Overflowed");
+    if (strarr->size == strarr->used) {
+        u64 size = sizeof(*strarr->ranges) * strarr->size;
+        void *ranges = reallocate(strarr->alloc, strarr->ranges, size, size * 2);
+        
+        if (!ranges) {
+            log_error("Failed to grow ranges array");
+            return -1;
+        }
+        
+        strarr->ranges = ranges;
+        strarr->size *= 2;
+    }
+    
+    struct string ret;
+    if (string_buffer_add_all(&strarr->buf, str, &ret)) {
+        u64 new_size = strarr->buf.size * 2 + str.size + 1;
+        char *buf = reallocate(strarr->alloc, strarr->buf.data,
+                               strarr->buf.size, new_size);
+        if (!buf) {
+            log_error("Failed to grow buffer");
+            return -1;
+        }
+        
+        strarr->buf.data = buf;
+        strarr->buf.size = new_size;
+        string_buffer_add_all(&strarr->buf, str, &ret);
+        log_error_if(!ret.data, "Failed to add string to expanded buffer (but this should be impossible!)");
+    }
+    
+    strarr->ranges[strarr->used].offset = (u64)(ret.data - strarr->buf.data);
+    strarr->ranges[strarr->used].size = ret.size;
+    strarr->used += 1;
+    
+    return 0;
+}
+
+def_string_array_get(string_array_get)
+{
+    log_error_if(strarr->used == 0, "Indexing empty array");
+    log_error_if(strarr->used <= i, "Out of bounds access - max valid index %u, but got %u",
+                 strarr->used - 1, i);
+    
+    if (!ret->data) {
+        ret->size = strarr->ranges[i].size;
+        return 0;
+    }
+    
+    memcpy(ret->data, strarr->buf.data + strarr->ranges[i].offset, ret->size + 1);
+    ret->data[ret->size] = 0;
+    
+    return ret->size < strarr->ranges[i].size ? -1 : 0;
+}
+
+def_string_array_get_raw(string_array_get_raw)
+{
+    log_error_if(strarr->used == 0, "Indexing empty array");
+    log_error_if(strarr->used <= i, "Out of bounds access - max valid index %u, but got %u",
+                 strarr->used - 1, i);
+    return (struct string) {.data = strarr->buf.data + strarr->ranges[i].offset, .size = strarr->ranges[i].size};
+}
+
+def_destroy_string_array(destroy_string_array)
+{
+    deallocate(strarr->alloc, strarr->ranges, sizeof(*strarr->ranges) * strarr->size);
+    deallocate(strarr->alloc, strarr->buf.data, strarr->buf.size);
+    memset(strarr, 0, sizeof(*strarr));
 }
 
 // array.c

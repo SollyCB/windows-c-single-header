@@ -44,25 +44,34 @@ int main() {
     allocator_t alloc;
     create_allocator_arena(NULL, 4096, &alloc);
     
-    thing_array_t array;
-    create_thing_array(16, &alloc, &array);
+    string_array_t arr;
+    create_string_array(16, 16, &alloc, &arr);
     
     for(int i=0; i < cl_array_size(names); ++i) {
-        struct thing t;
-        t.i = i;
-        t.s = names[i];
-        t.c = names[i][0];
-        thing_array_add(&array, &t);
-        println("%u, %u, %s, %c", i, array[i].i, array[i].s, array[i].c);
+        struct string s;
+        s.data = names[i];
+        s.size = strlen(names[i]);
+        assert(string_array_add(&arr, s) == 0);
     }
     
-    println("\n\n");
-    
+    char buf[128];
+    struct string s;
     for(int i=0; i < cl_array_size(names); ++i) {
-        println("%u, %u, %s, %c", i, array[i].i, array[i].s, array[i].c);
+        s.data = NULL;
+        log_error_if(string_array_get(&arr, i, &s), "Error getting size on %u", i);
+        
+        s.data = buf;
+        log_error_if(string_array_get(&arr, i, &s), "Error gettings string on %u", i);
+        assert(memcmp(s.data, names[i], s.size + 1) == 0);
+        
+        s = string_array_get_raw(&arr, i);
+        assert(memcmp(s.data, names[i], s.size + 1) == 0);
     }
     
-    destroy_thing_array(&array);
+    s.size = 3;
+    if (string_array_get(&arr, 0, &s)) {
+        println("TRUNCATE - full %s, got %s", names[0], s.data);
+    }
     
     return 0;
 }
