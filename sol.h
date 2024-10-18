@@ -8,6 +8,7 @@
 #include <string.h>
 #include <intrin.h>
 #include <assert.h>
+#include <math.h>
 #include <windows.h>
 
 #define SCB_OVERRIDE_STDLIB
@@ -17,6 +18,11 @@
 #define assert scb_assert
 #define snprintf scb_snprintf
 #endif
+
+#define local_persist static
+#define internal static
+
+#define dll_export __declspec(dllexport)
 
 typedef int8_t   s8;
 typedef int16_t  s16;
@@ -28,6 +34,10 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef float f32;
 typedef double f64;
+
+typedef u32 b32;
+
+typedef void (*voidpfn)(void);
 
 #define Max_s8  0x7f
 #define Max_s16 0x7fff
@@ -59,10 +69,22 @@ typedef double f64;
 #define memb_to_struct(memb, memb_of, memb_name) \
 ((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
 
+#define memb_size(type, memb) sizeof(((type*)0)->memb)
+
 #define for_bits(pos, count, mask) \
 for(count = 0, pos = (typeof(pos))ctz(mask); \
 count < popcnt(mask); \
 pos = (typeof(pos))ctz(mask & (0xffff << (pos + 1))), ++count)
+
+static inline u64 trunc_copy(void *to, u64 to_sz, void *from, u64 from_sz)
+{
+    if (to_sz < from_sz) {
+        memcpy(to, from, to_sz);
+        return to_sz;
+    }
+    memcpy(to, from, from_sz);
+    return from_sz;
+}
 
 enum type {
     TYPE_LINEAR,
@@ -71,6 +93,7 @@ enum type {
 
 // preproc.h
 #define paste(...) __VA_ARGS__
+#define stringify(...) #__VA_ARGS__
 
 #define def_wrapper_fn(wrapper_name, wrapped_name, ret_type, wrapper_args, wrapped_args) \
 static inline ret_type wrapper_name(wrapper_args) { return (ret_type)wrapped_name(wrapped_args); }
@@ -79,8 +102,13 @@ static inline ret_type wrapper_name(wrapper_args) { return (ret_type)wrapped_nam
 extern struct os {
     bool is_valid;
     u32 page_size;
+    u32 thread_count;
     HANDLE stdout_handle;
 } os;
+
+struct os_process {
+    void *p,*t; // process and thread handle
+};
 
 #define def_create_os(name) void name(void)
 def_create_os(create_os);
@@ -99,6 +127,24 @@ def_os_page_size(os_page_size);
 
 #define def_os_stdout(name) HANDLE name(void)
 def_os_stdout(os_stdout);
+
+#define def_os_create_lib(name) void* name(char *uri)
+def_os_create_lib(os_create_lib);
+
+#define def_os_libproc(name) voidpfn name(void *lib, char *proc)
+def_os_libproc(os_libproc);
+
+#define def_os_destroy_lib(name) void name(void *lib)
+def_os_destroy_lib(os_destroy_lib);
+
+#define def_os_create_process(name) int name(char *cmdline, struct os_process *p)
+def_os_create_process(os_create_process);
+
+#define def_os_await_process(name) int name(struct os_process *p)
+def_os_await_process(os_await_process);
+
+#define def_os_destroy_process(name) void name(struct os_process *p)
+def_os_destroy_process(os_destroy_process);
 
 // rc.h
 typedef struct rc rc_t;
@@ -136,6 +182,18 @@ def_write_file(write_file);
 #define def_read_file(name) u64 name(char *uri, void *buf, u64 size)
 def_read_file(read_file);
 
+#define def_copy_file(name) int name(char *fnew, char *fold)
+def_copy_file(copy_file);
+
+#define def_trunc_file(name) int name(char *uri, u64 sz)
+def_trunc_file(trunc_file);
+
+enum {
+    FTIM_MOD,
+};
+#define def_cmp_ftim(name) int name(u32 opt, char *x, char *y)
+def_cmp_ftim(cmp_ftim);
+
 // print.h
 #define def_snprintf(name) u32 name(char *buf, u32 size, const char *fmt, ...)
 def_snprintf(scb_snprintf);
@@ -153,6 +211,21 @@ char m__println_buf[2046]; \
 u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, __VA_ARGS__); \
 m__println_buf[m__println_size++] = '\n'; \
 write_stdout(m__println_buf, m__println_size); \
+} while(0);
+
+#define print_err(fmt, ...) \
+do { \
+char m__print_buf[2046]; \
+u32 m__print_size = scb_snprintf(m__print_buf, sizeof(m__print_buf), fmt, __VA_ARGS__); \
+write_stderr(m__print_buf, m__print_size); \
+} while(0);
+
+#define println_err(fmt, ...) \
+do { \
+char m__println_buf[2046]; \
+u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, __VA_ARGS__); \
+m__println_buf[m__println_size++] = '\n'; \
+write_stderr(m__println_buf, m__println_size); \
 } while(0);
 
 // assert.h
@@ -194,6 +267,14 @@ do { if (prec) log_os_error(__VA_ARGS__); } while(0);
 #define invalid_default_case log_error("invalid default case")
 
 // math.h
+#define kb(x) ((x) * 1024UL)
+#define mb(x) (kb(x) * 1024UL)
+
+#define secs_to_ms(x) ((x) * 1000)
+
+struct rect_u32 { u32 w,h; };
+struct rect_s32 { s32 w,h; };
+
 static inline bool is_pow2(u64 x)
 {
     // NOTE(SollyCB): I know that zero is not a power of two, but this function
@@ -215,10 +296,24 @@ static inline u64 next_pow2(u64 x) // TODO(SollyCB): There must be a better impl
     return is_pow2(x) ? x : (u64)1 << clz(x);
 }
 
+static inline u64 inc_and_wrap(u64 inc, u64 wrap)
+{
+    log_error_if(!is_pow2(wrap), "Wrapping value must be a power of 2");
+    return (inc + 1) & (wrap - 1);
+}
+
 static inline u64 align(u64 size, u64 alignment) {
     log_error_if(!is_pow2(alignment), "Trying to align to a value which is not a power of 2");
     u64 alignment_mask = alignment - 1;
     return (size + alignment_mask) & ~alignment_mask;
+}
+
+static inline u32 log2_u32(u32 x)
+{
+    u32 c = 0;
+    while(x /= 2)
+        c += 1;
+    return c;
 }
 
 // list.h
@@ -397,8 +492,8 @@ static inline def_create_allocator(create_allocator, allocator)
 #define create_allocator_linear(buf, size, alloc) \
 do { (alloc)->type = TYPE_LINEAR; create_allocator(buf, size, alloc); } while(0);
 
-#define create_allocator_arena(buf, size, alloc) \
-do { (alloc)->type = TYPE_ARENA; create_allocator(buf, size, alloc); } while(0);
+#define create_allocator_arena(size, alloc) \
+do { (alloc)->type = TYPE_ARENA; create_allocator(NULL, size, alloc); } while(0);
 
 static inline def_allocate(allocate, allocator)
 {
@@ -463,6 +558,7 @@ struct string {
     u64 size;
     char *data;
 };
+#define STR(cstr) (struct string) { .data = (cstr), .size = strlen(cstr) }
 
 typedef struct string_buffer {
     u64 size;
@@ -502,9 +598,19 @@ def_string_array_get(string_array_get);
 def_string_array_get_raw(string_array_get_raw);
 def_destroy_string_array(destroy_string_array);
 
+// search for, search in
+#define def_strfind(name) u32 name(struct string sf, struct string si)
+def_strfind(strfind);
+
+#define def_flatten_pchar_array(name) struct string name(char *arr[], u32 arr_sz, char *buf, u32 buf_sz, char sep)
+def_flatten_pchar_array(flatten_pchar_array);
+
 // array.h
 #define def_create_array_args(type) u64 size, allocator_t *alloc, type *array
 #define def_array_add_args(type, elem_type) type *array, elem_type *elem
+#define def_array_pop_args(type, elem_type) type *array, elem_type *opt_ret
+#define def_array_last_args(type, elem_type) type *array, elem_type *ret
+#define def_array_last_raw_args(type, elem_type) type *array
 #define def_destroy_array_args(type) type *array
 
 #define def_create_array_ret int
@@ -662,14 +768,16 @@ def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret
 #ifdef SOL_DEF
 
 // os.c
-struct os os = {};
+struct os os;
 
 def_create_os(create_os)
 {
+    assert(os.is_valid == false);
     SYSTEM_INFO si;
     GetSystemInfo(&si);
     os.page_size = si.dwPageSize;
     os.stdout_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    os.thread_count = si.dwNumberOfProcessors;
 }
 
 def_os_error_string(os_error_string)
@@ -702,6 +810,55 @@ def_os_stdout(os_stdout)
     if (!os.is_valid)
         create_os();
     return os.stdout_handle;
+}
+
+def_os_create_lib(os_create_lib)
+{
+    return LoadLibrary(uri);
+}
+
+def_os_libproc(os_libproc)
+{
+    return (voidpfn)GetProcAddress(lib, proc);
+}
+
+def_os_destroy_lib(os_destroy_lib)
+{
+    FreeLibrary(lib);
+}
+
+def_os_create_process(os_create_process)
+{
+    STARTUPINFO si = {sizeof(si)};
+    PROCESS_INFORMATION pi = {};
+    
+    if (!CreateProcess(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        log_os_error("Failed to create process with command %s", cmdline);
+        return -1;
+    }
+    
+    p->p = pi.hProcess;
+    p->t = pi.hThread;
+    return 0;
+}
+
+def_os_await_process(os_await_process)
+{
+    WaitForSingleObject(p->p, INFINITE);
+    
+    int res;
+    if (!GetExitCodeProcess(p->p, (LPDWORD)&res)) {
+        log_error("Failed to get process exit code");
+        return Max_s32;
+    }
+    
+    return res;
+}
+
+def_os_destroy_process(os_destroy_process)
+{
+    CloseHandle(p->p);
+    CloseHandle(p->t);
 }
 
 // file.c
@@ -770,6 +927,68 @@ def_read_file(read_file)
     
     CloseHandle(fd);
     return res;
+}
+
+def_copy_file(copy_file)
+{
+    if (!CopyFile(fold, fnew, false)) {
+        log_os_error("Failed to copy from %s to %s", fnew, fold);
+        return -1;
+    }
+    return 0;
+}
+
+def_trunc_file(trunc_file)
+{
+    int res = 0;
+    
+    HANDLE h = CreateFile(uri, GENERIC_READ|GENERIC_WRITE,
+                          0, NULL, CREATE_ALWAYS, 0, NULL);
+    
+    if (h == INVALID_HANDLE_VALUE) {
+        log_error("Failed to open file for truncation (%s)", uri);
+        res = -1;
+        goto out;
+    }
+    
+    FILE_END_OF_FILE_INFO fi = {.EndOfFile = (DWORD)sz};
+    
+    if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &fi, sizeof(fi))) {
+        log_error("Failed to truncate file %s to size %u", uri, sz);
+        res = -1;
+        goto out;
+    }
+    
+    out:
+    CloseHandle(h);
+    return res;
+}
+
+def_cmp_ftim(cmp_ftim)
+{
+    switch(opt) {
+        case FTIM_MOD: {
+            WIN32_FIND_DATA dx,dy;
+            if (FindFirstFile(x, &dx) == INVALID_HANDLE_VALUE) {
+                log_error("Failed to stat file %s", x);
+                return Max_s32;
+            }
+            if (FindFirstFile(y, &dy) == INVALID_HANDLE_VALUE) {
+                log_error("Failed to stat file %s", x);
+                return Max_s32;
+            }
+            
+            u64 tx = ((u64)dx.ftLastWriteTime.dwHighDateTime << 31) |((u64)dx.ftLastWriteTime.dwLowDateTime);
+            u64 ty = ((u64)dy.ftLastWriteTime.dwHighDateTime << 31) |((u64)dy.ftLastWriteTime.dwLowDateTime);
+            
+            if (tx < ty) return -1;
+            if (tx > ty) return 1;
+            return 0;
+        } break;
+        default:
+        invalid_default_case;
+    }
+    return Max_s32;
 }
 
 // print.c
@@ -1326,6 +1545,35 @@ def_destroy_string_array(destroy_string_array)
     deallocate(strarr->alloc, strarr->ranges, sizeof(*strarr->ranges) * strarr->size);
     deallocate(strarr->alloc, strarr->buf.data, strarr->buf.size);
     memset(strarr, 0, sizeof(*strarr));
+}
+
+def_strfind(strfind)
+{
+    if (si.size < sf.size)
+        return Max_u32;
+    
+    for(u32 i=0; i < si.size - sf.size; ++i) {
+        if (memcmp(si.data + i, sf.data, sf.size) == 0)
+            return i;
+    }
+    
+    return Max_u32;
+}
+
+def_flatten_pchar_array(flatten_pchar_array)
+{
+    struct string str = {.data = buf, .size = 0};
+    buf_sz -= 1; // null term
+    
+    for(u32 i=0; i < arr_sz && str.size < buf_sz; ++i) {
+        str.size += trunc_copy(buf + str.size, buf_sz - str.size, arr[i], strlen(arr[i]));
+        if (str.size == buf_sz)
+            break;
+        str.data[str.size++] = sep;
+    }
+    
+    str.data[str.size] = 0;
+    return str;
 }
 
 // array.c

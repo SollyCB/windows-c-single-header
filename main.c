@@ -42,7 +42,7 @@ def_typed_array(thing, struct thing)
 int main() {
     
     allocator_t alloc;
-    create_allocator_arena(NULL, 4096, &alloc);
+    create_allocator_arena(4096, &alloc);
     
     string_array_t arr;
     create_string_array(16, 16, &alloc, &arr);
