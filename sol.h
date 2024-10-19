@@ -17,6 +17,7 @@
 #undef assert
 #define assert scb_assert
 #define snprintf scb_snprintf
+#define strcpy scb_strcpy
 #endif
 
 #define local_persist static
@@ -188,15 +189,27 @@ def_copy_file(copy_file);
 #define def_trunc_file(name) int name(char *uri, u64 sz)
 def_trunc_file(trunc_file);
 
+#define def_getftim(name) u64 name(char *uri)
+def_getftim(getftim);
+
 enum {
     FTIM_MOD,
 };
-#define def_cmp_ftim(name) int name(u32 opt, char *x, char *y)
-def_cmp_ftim(cmp_ftim);
+#define def_cmpftim(name) int name(u32 opt, char *x, char *y)
+def_cmpftim(cmpftim);
 
 // print.h
 #define def_snprintf(name) u32 name(char *buf, u32 size, const char *fmt, ...)
 def_snprintf(scb_snprintf);
+
+#define strfmt(str, fmt, ...) scb_snprintf(str.data, (u32)str.size, fmt, __VA_ARGS__)
+#define memfmt(buf, sz, fmt, ...) scb_snprintf(buf, sz, fmt, __VA_ARGS__)
+
+#if DEBUG
+#define dbg_strfmt strfmt
+#else
+#define dbg_strfmt(...)
+#endif
 
 #define print(fmt, ...) \
 do { \
@@ -235,11 +248,9 @@ println("[%s, %s, %u] ASSERT : %s", __FILE__, __FUNCTION__, __LINE__, #x); \
 __debugbreak(); \
 }
 
-#define log_break \
-do { \
-_mm_mfence(); \
-__debugbreak(); \
-} while(0);
+
+#if DEBUG
+#define log_break __debugbreak()
 
 #define log_error(...) \
 do { \
@@ -247,9 +258,6 @@ print("[%s, %s, %u] LOG ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
 println(__VA_ARGS__); \
 log_break; \
 } while(0);
-
-#define log_error_if(prec, ...) \
-do { if (prec) log_error(__VA_ARGS__); } while(0);
 
 #define log_os_error(...) \
 do { \
@@ -260,11 +268,18 @@ print(__VA_ARGS__); \
 println(" : %s", m__log_os_error_buf); \
 log_break; \
 } while(0);
+#else
+#define log_error(...)
+#define log_os_error(...)
+#endif
+
+#define log_error_if(prec, ...) \
+do { if (prec) log_error(__VA_ARGS__); } while(0);
 
 #define log_os_error_if(prec, ...) \
 do { if (prec) log_os_error(__VA_ARGS__); } while(0);
 
-#define invalid_default_case log_error("invalid default case")
+#define invalid_default_case log_error("Invalid default case")
 
 // math.h
 #define kb(x) ((x) * 1024UL)
@@ -558,7 +573,8 @@ struct string {
     u64 size;
     char *data;
 };
-#define STR(cstr) (struct string) { .data = (cstr), .size = strlen(cstr) }
+#define STR(cstr) ((struct string) { .data = (cstr), .size = strlen(cstr) })
+#define CLSTR(buf) ((struct string) { .data = (buf), .size = sizeof(buf) })
 
 typedef struct string_buffer {
     u64 size;
@@ -604,6 +620,14 @@ def_strfind(strfind);
 
 #define def_flatten_pchar_array(name) struct string name(char *arr[], u32 arr_sz, char *buf, u32 buf_sz, char sep)
 def_flatten_pchar_array(flatten_pchar_array);
+
+static inline u64 scb_strcpy(struct string to, struct string from) {
+    return trunc_copy(to.data, to.size, from.data, from.size);
+}
+
+static inline u64 strbufcpy(void *buf, u64 buf_sz, struct string from) {
+    return trunc_copy(buf, buf_sz, from.data, from.size);
+}
 
 // array.h
 #define def_create_array_args(type) u64 size, allocator_t *alloc, type *array
@@ -964,23 +988,32 @@ def_trunc_file(trunc_file)
     return res;
 }
 
-def_cmp_ftim(cmp_ftim)
+def_getftim(getftim)
 {
+    WIN32_FIND_DATA d;
+    if (FindFirstFile(uri, &d) == INVALID_HANDLE_VALUE) {
+        log_error("Failed to stat file %s", uri);
+        return Max_u64;
+    }
+    
+    ULARGE_INTEGER li; // Fuck this api...
+    li.LowPart = d.ftLastWriteTime.dwLowDateTime;
+    li.HighPart = d.ftLastWriteTime.dwHighDateTime;
+    return li.QuadPart;
+}
+
+def_cmpftim(cmpftim)
+{
+    u64 tx = getftim(x);
+    u64 ty = getftim(y);
+    
+    if (tx == Max_u64 || ty == Max_u64) {
+        log_error("Failed to get file times for comparison");
+        return Max_s32;
+    }
+    
     switch(opt) {
         case FTIM_MOD: {
-            WIN32_FIND_DATA dx,dy;
-            if (FindFirstFile(x, &dx) == INVALID_HANDLE_VALUE) {
-                log_error("Failed to stat file %s", x);
-                return Max_s32;
-            }
-            if (FindFirstFile(y, &dy) == INVALID_HANDLE_VALUE) {
-                log_error("Failed to stat file %s", x);
-                return Max_s32;
-            }
-            
-            u64 tx = ((u64)dx.ftLastWriteTime.dwHighDateTime << 31) |((u64)dx.ftLastWriteTime.dwLowDateTime);
-            u64 ty = ((u64)dy.ftLastWriteTime.dwHighDateTime << 31) |((u64)dy.ftLastWriteTime.dwLowDateTime);
-            
             if (tx < ty) return -1;
             if (tx > ty) return 1;
             return 0;
