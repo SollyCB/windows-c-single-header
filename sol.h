@@ -731,7 +731,7 @@ typedef struct dict_iter dict_iter_t;
 //     thing_dict_get_iter(&dict, &iter);
 // 
 //     struct thing_dict_kv kv;
-//     dict_for_each(&kv, &iter, thing_dict_iter_next) {
+//     dict_for_each(&iter, thing_dict_iter_next, &kv) {
 //         println("key %u, thing.s %s", kv->key, kv->val.s)
 //     }
 // 
@@ -739,7 +739,7 @@ typedef struct dict_iter dict_iter_t;
 // }
 //
 /*********************************************************************************************/
-// Header Implementation
+// Header
 
 #define create_typed_dict_args(dict_type) u64 size, allocator_t *alloc, dict_type *dict
 #define create_typed_dict_ret() int
@@ -782,7 +782,7 @@ def_destroy_dict(destroy_dict);
 def_get_dict_key(get_dict_key);
 
 // pass a reference to a kv and an iter (see above example)
-#define dict_for_each(kv, dict_iter, func) \
+#define dict_for_each(dict_iter, func, kv) \
 while(func(dict_iter, kv))
 
 #define def_dict_kv(name, type) \

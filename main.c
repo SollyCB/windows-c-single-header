@@ -41,9 +41,14 @@ int main() {
     thing_dict_get_iter(&dict, &it);
     
     struct thing t;
+    dict_for_each(&it, thing_dict_iter_next, &t) {
+        println("%u: %s | %s", t.i, t.s, names[t.i]);
+    }
+#if 0
     dict_for_each(&t, &it, thing_dict_iter_next) {
         println("%u: %s | %s", t.i, t.s, names[t.i]);
     }
+#endif
     
 #if 0
     string_array_t arr;
