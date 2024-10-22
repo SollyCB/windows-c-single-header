@@ -738,6 +738,8 @@ typedef struct dict_iter dict_iter_t;
 //     destroy_thing_dict(&dict);
 // }
 //
+/*********************************************************************************************/
+// Header Implementation
 
 #define create_typed_dict_args(dict_type) u64 size, allocator_t *alloc, dict_type *dict
 #define create_typed_dict_ret() int
