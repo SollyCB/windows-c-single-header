@@ -679,8 +679,10 @@ def_destroy_array(destroy_array);
 typedef struct dict dict_t;
 typedef struct dict_iter dict_iter_t;
 
+/******************************************************************************************/
+// Interface:
 //
-// def_typed_dict(abbrev, val_type):
+// The macro 'def_typed_dict(abbrev, val_type)' expands to:
 // 
 // struct abbrev_dict_kv {
 //     u64 key;
@@ -690,13 +692,16 @@ typedef struct dict_iter dict_iter_t;
 // typedef struct abbrev_dict abbrev_dict_t
 // typedef struct abbrev_dict_iter abbrev_dict_iter_t
 //
-// int create_dict(u64 size, allocator_t *alloc, dict_t *dict)
-// int dict_insert(abbrev_dict_t *dict, struct string key, val_type *val)
-// bool dict_find(abbrev_dict_t *dict, struct string key, val_type *ret)
-// bool dict_remove(dict_t *dict, struct string key)
-// void dict_get_iter(dict_t *dict, struct string key)
-// bool dict_iter_next(abbrev_dict_t *dict, abbrev_dict_iter_t *iter, val_type *ret)
-// void destroy_dict(abbrev_dict_iter_t *iter)
+// int create_abbrev_dict(u64 size, allocator_t *alloc, dict_t *dict)
+// int abbrev_dict_insert(abbrev_dict_t *dict, struct string key, val_type *val)
+// bool abbrev_dict_find(abbrev_dict_t *dict, struct string key, val_type *ret)
+// bool abbrev_dict_remove(dict_t *dict, struct string key)
+// void abbrev_dict_get_iter(dict_t *dict, struct string key)
+// bool abbrev_dict_iter_next(abbrev_dict_t *dict, abbrev_dict_iter_t *iter, val_type *ret)
+// void destroy_abbrev_dict(abbrev_dict_iter_t *iter)
+//
+/******************************************************************************************/
+// Sample program demonstrating correct usage:
 //
 // struct thing {
 //     u32 i;
@@ -708,7 +713,7 @@ typedef struct dict_iter dict_iter_t;
 // void func(u32 size, allocator *alloc, u32 count, struct string *keys, struct thing *things)
 // {
 //     thing_dict_t dict;
-//     if (create_dict(size, alloc, &dict))
+//     if (create_thing_dict(size, alloc, &dict))
 //         error;
 //
 //     for(u32 i=0; i < count; ++i) {
@@ -725,8 +730,8 @@ typedef struct dict_iter dict_iter_t;
 //     thing_dict_iter_t iter;
 //     thing_dict_get_iter(&dict, &iter);
 // 
-//     struct thing_dict_kv *kv;
-//     dict_for_each(kv, &iter, thing_dict_iter_next) {
+//     struct thing_dict_kv kv;
+//     dict_for_each(&kv, &iter, thing_dict_iter_next) {
 //         println("key %u, thing.s %s", kv->key, kv->val.s)
 //     }
 // 
@@ -774,6 +779,7 @@ def_destroy_dict(destroy_dict);
 #define def_get_dict_key(name) u64 name(struct string key)
 def_get_dict_key(get_dict_key);
 
+// pass a reference to a kv and an iter (see above example)
 #define dict_for_each(kv, dict_iter, func) \
 while(func(dict_iter, kv))
 
