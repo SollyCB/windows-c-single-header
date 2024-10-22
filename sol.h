@@ -75,7 +75,7 @@ typedef void (*voidpfn)(void);
 #define for_bits(pos, count, mask) \
 for(count = 0, pos = (typeof(pos))ctz(mask); \
 count < popcnt(mask); \
-pos = (typeof(pos))ctz(mask & (0xffff << (pos + 1))), ++count)
+pos = (typeof(pos))ctz((u64)mask & (Max_u64 << (pos + 1))), ++count)
 
 static inline u64 trunc_copy(void *to, u64 to_sz, void *from, u64 from_sz)
 {
@@ -85,6 +85,11 @@ static inline u64 trunc_copy(void *to, u64 to_sz, void *from, u64 from_sz)
     }
     memcpy(to, from, from_sz);
     return from_sz;
+}
+
+static inline bool is_whitechar(char c)
+{
+    return c == ' ' || c == '\n' || c == '\t';
 }
 
 enum type {
@@ -146,6 +151,9 @@ def_os_await_process(os_await_process);
 
 #define def_os_destroy_process(name) void name(struct os_process *p)
 def_os_destroy_process(os_destroy_process);
+
+#define def_os_sleep_ms(name) void name(u32 ms)
+def_os_sleep_ms(os_sleep_ms);
 
 // rc.h
 typedef struct rc rc_t;
@@ -284,6 +292,7 @@ do { if (prec) log_os_error(__VA_ARGS__); } while(0);
 // math.h
 #define kb(x) ((x) * 1024UL)
 #define mb(x) (kb(x) * 1024UL)
+#define gb(x) (mb(x) * 1024UL)
 
 #define secs_to_ms(x) ((x) * 1000)
 
@@ -329,6 +338,17 @@ static inline u32 log2_u32(u32 x)
     while(x /= 2)
         c += 1;
     return c;
+}
+
+static inline u64 set_add(u64 set, u64 i)
+{
+    log_error_if(i > 64, "Trying to add %u to a set which only holds 64", i);
+    return set | ((u64)1 << i);
+}
+
+static inline bool set_test(u64 set, u64 i)
+{
+    return set & ((u64)1 << i);
 }
 
 // list.h
@@ -474,7 +494,7 @@ def_create_allocator(create_arena, arena);
 def_allocate(linear_allocate, linear);
 def_allocate(arena_allocate, arena);
 
-#define def_reallocate(name, type) void *name(type ## _t *alloc, void *old_p, u64 old_size, u64 new_size)
+#define def_reallocate(name, type) void *name(type ## _t *alloc, void *old_p, u64 new_size)
 def_reallocate(linear_reallocate, linear);
 def_reallocate(arena_reallocate, arena);
 
@@ -486,7 +506,7 @@ def_allocator_size(arena_size, arena);
 def_allocator_used(linear_used, linear);
 def_allocator_used(arena_used, arena);
 
-#define def_deallocate(name, type) void name(type ## _t *alloc, void *p, u64 size)
+#define def_deallocate(name, type) void name(type ## _t *alloc, void *p)
 def_deallocate(linear_deallocate, linear);
 def_deallocate(arena_deallocate, arena);
 
@@ -543,8 +563,8 @@ static inline def_allocator_used(allocator_used, allocator)
 static inline def_reallocate(reallocate, allocator)
 {
     switch(alloc->type) {
-        case TYPE_LINEAR: return linear_reallocate(&alloc->linear, old_p, old_size, new_size);
-        case TYPE_ARENA: return arena_reallocate(&alloc->arena, old_p, old_size, new_size);
+        case TYPE_LINEAR: return linear_reallocate(&alloc->linear, old_p, new_size);
+        case TYPE_ARENA: return arena_reallocate(&alloc->arena, old_p, new_size);
         default: invalid_default_case;
     }
     return NULL;
@@ -553,8 +573,8 @@ static inline def_reallocate(reallocate, allocator)
 static inline def_deallocate(deallocate, allocator)
 {
     switch(alloc->type) {
-        case TYPE_LINEAR: linear_deallocate(&alloc->linear, p, size); break;
-        case TYPE_ARENA: arena_deallocate(&alloc->arena, p, size); break;
+        case TYPE_LINEAR: linear_deallocate(&alloc->linear, p); break;
+        case TYPE_ARENA: arena_deallocate(&alloc->arena, p); break;
         default: invalid_default_case;
     }
 }
@@ -885,6 +905,11 @@ def_os_destroy_process(os_destroy_process)
     CloseHandle(p->t);
 }
 
+def_os_sleep_ms(os_sleep_ms)
+{
+    Sleep(ms);
+}
+
 // file.c
 enum {
     FILE_READ = 0x0,
@@ -1197,6 +1222,13 @@ def_snprintf(scb_snprintf)
 }
 
 // alloc.c
+#define ALLOC_INFO_GUARD 0xcafe6969feedbeef
+
+struct alloc_info {
+    u64 guard;
+    u64 size;
+};
+
 struct arena_header {
     u64 validation_bits;
     linear_t linear;
@@ -1208,6 +1240,19 @@ struct arena_header {
 // before as I had clearly rushed the implementations.
 #define ARENA_HEADER_SIZE align(sizeof(struct arena_header), 16)
 #define ARENA_VALIDATION_BITS 0xcafebabecafebabe
+
+static inline u64 alloc_check_guard_and_get_size(void *p)
+{
+    struct alloc_info *info = (typeof(info))p - 1;
+    log_error_if(info->guard != ALLOC_INFO_GUARD, "Allocation guard was corrupted or address is not a valid allocation");
+    return info->size;
+}
+
+static inline void alloc_info_new_size(void *p, u64 size)
+{
+    struct alloc_info *info = (typeof(info))p - 1;
+    info->size = size;
+}
 
 static inline bool linear_is_top(linear_t *alloc, void *p, u64 size)
 {
@@ -1270,14 +1315,14 @@ static void* arena_header_allocate(struct arena_header *block, u64 size)
     return p;
 }
 
-static void arena_header_deallocate(arena_t *alloc, struct arena_header *block, void *p, u64 size)
+static void arena_header_deallocate(arena_t *alloc, struct arena_header *block, void *p)
 {
     log_error_if(!arena_header_is_valid(block), "Failed to validate arena header");
     if (!rc_dec(&block->rc)) {
         destroy_arena_block(alloc, block);
         return;
     }
-    linear_deallocate(&block->linear, p, size);
+    linear_deallocate(&block->linear, p);
 }
 
 def_create_allocator(create_linear, linear)
@@ -1298,22 +1343,31 @@ def_create_allocator(create_linear, linear)
 
 def_allocate(linear_allocate, linear)
 {
+    struct alloc_info *info;
     size = alloc_align(size);
-    if (alloc->size < alloc->used + size)
+    if (alloc->size < alloc->used + size + sizeof(*info))
         return NULL;
     
-    alloc->used += size;
-    return alloc->data + alloc->used - alloc_align(size);
+    info = (typeof(info))(alloc->data + alloc->used);
+    info->guard = ALLOC_INFO_GUARD;
+    info->size = size;
+    
+    alloc->used += size + sizeof(*info);
+    return alloc->data + alloc->used - size;
 }
 
 def_reallocate(linear_reallocate, linear)
 {
+    u64 old_size = alloc_check_guard_and_get_size(old_p);
+    new_size = alloc_align(new_size);
+    
     if (linear_is_top(alloc, old_p, old_size)) {
-        if (alloc->size < alloc->used - alloc_align(old_size) + alloc_align(new_size))
-            return NULL;
-        alloc->used -= alloc_align(old_size);
-        alloc->used += alloc_align(new_size);
-        return alloc->data + alloc->used - alloc_align(new_size);
+        log_error_if(new_size < old_size && old_size - new_size > alloc->used, "Allocator underflow");
+        log_error_if(new_size > old_size && new_size - old_size > alloc->size - alloc->used, "Allocator overflow");
+        
+        alloc->used += (s64)new_size - (s64)old_size;
+        alloc_info_new_size(old_p, new_size);
+        return old_p;
     }
     
     if (new_size < old_size)
@@ -1338,8 +1392,9 @@ def_allocator_used(linear_used, linear)
 
 def_deallocate(linear_deallocate, linear)
 {
+    u64 size = alloc_check_guard_and_get_size(p);
     if (linear_is_top(alloc, p, size))
-        alloc->used -= alloc_align(size);
+        alloc->used -= alloc_align(size) + sizeof(struct alloc_info);
 }
 
 def_destroy_allocator(destroy_linear, linear)
@@ -1381,11 +1436,13 @@ def_allocate(arena_allocate, arena)
 
 def_reallocate(arena_reallocate, arena)
 {
+    u64 old_size = alloc_check_guard_and_get_size(old_p);
+    
     void *p;
     struct arena_header *block = arena_find_block(alloc, old_p);
     
     if (linear_is_top(&block->linear, old_p, old_size)) {
-        p = linear_reallocate(&block->linear, old_p, old_size, new_size);
+        p = linear_reallocate(&block->linear, old_p, new_size);
         if (p)
             return p;
     }
@@ -1393,7 +1450,7 @@ def_reallocate(arena_reallocate, arena)
     p = arena_allocate(alloc, new_size);
     if (p) {
         memcpy(p, old_p, old_size);
-        arena_header_deallocate(alloc, block, old_p, old_size);
+        arena_header_deallocate(alloc, block, old_p);
     }
     return p;
 }
@@ -1425,7 +1482,7 @@ def_allocator_used(arena_used, arena)
 def_deallocate(arena_deallocate, arena)
 {
     struct arena_header *block = arena_find_block(alloc, p);
-    arena_header_deallocate(alloc, block, p, size);
+    arena_header_deallocate(alloc, block, p);
 }
 
 def_destroy_allocator(destroy_arena, arena)
@@ -1497,7 +1554,7 @@ def_create_string_array(create_string_array)
     ret->ranges = allocate(alloc, sizeof(*ret->ranges) * arr_size);
     if (!ret->ranges) {
         log_error("Failed to allocate memory for ranges array");
-        deallocate(alloc, buf, buf_size);
+        deallocate(alloc, buf);
         return -1;
     }
     
@@ -1514,7 +1571,7 @@ def_string_array_add(string_array_add)
     log_error_if(strarr->size < strarr->used, "Overflowed");
     if (strarr->size == strarr->used) {
         u64 size = sizeof(*strarr->ranges) * strarr->size;
-        void *ranges = reallocate(strarr->alloc, strarr->ranges, size, size * 2);
+        void *ranges = reallocate(strarr->alloc, strarr->ranges, size * 2);
         
         if (!ranges) {
             log_error("Failed to grow ranges array");
@@ -1528,8 +1585,7 @@ def_string_array_add(string_array_add)
     struct string ret;
     if (string_buffer_add_all(&strarr->buf, str, &ret)) {
         u64 new_size = strarr->buf.size * 2 + str.size + 1;
-        char *buf = reallocate(strarr->alloc, strarr->buf.data,
-                               strarr->buf.size, new_size);
+        char *buf = reallocate(strarr->alloc, strarr->buf.data, new_size);
         if (!buf) {
             log_error("Failed to grow buffer");
             return -1;
@@ -1559,7 +1615,9 @@ def_string_array_get(string_array_get)
         return 0;
     }
     
-    memcpy(ret->data, strarr->buf.data + strarr->ranges[i].offset, ret->size + 1);
+    ret->size = trunc_copy(ret->data, ret->size,
+                           strarr->buf.data + strarr->ranges[i].offset,
+                           strarr->ranges[i].size);
     ret->data[ret->size] = 0;
     
     return ret->size < strarr->ranges[i].size ? -1 : 0;
@@ -1575,8 +1633,8 @@ def_string_array_get_raw(string_array_get_raw)
 
 def_destroy_string_array(destroy_string_array)
 {
-    deallocate(strarr->alloc, strarr->ranges, sizeof(*strarr->ranges) * strarr->size);
-    deallocate(strarr->alloc, strarr->buf.data, strarr->buf.size);
+    deallocate(strarr->alloc, strarr->ranges);
+    deallocate(strarr->alloc, strarr->buf.data);
     memset(strarr, 0, sizeof(*strarr));
 }
 
@@ -1646,8 +1704,7 @@ def_array_add(array_add)
     
     if (tmp->used == tmp->size) {
         array_t old = *tmp;
-        tmp = reallocate(tmp->alloc, tmp, sizeof(*tmp) + tmp->size * stride,
-                         sizeof(*tmp) + tmp->size * stride * 2);
+        tmp = reallocate(tmp->alloc, tmp, sizeof(*tmp) + tmp->size * stride * 2);
         if (!tmp) {
             log_error("Failed to reallocate array");
             return -1;
@@ -1665,7 +1722,7 @@ def_array_add(array_add)
 def_destroy_array(destroy_array)
 {
     array_t *tmp = ((array_t*) *array) - 1;
-    deallocate(tmp->alloc, tmp, sizeof(*tmp) + tmp->size * stride);
+    deallocate(tmp->alloc, tmp);
     *array = NULL;
 }
 
@@ -1923,7 +1980,7 @@ def_dict_iter_next(dict_iter_next)
 
 def_destroy_dict(destroy_dict)
 {
-    deallocate(dict->alloc, dict->data, dict->cap + dict->cap * stride);
+    deallocate(dict->alloc, dict->data);
     memset(dict, 0, sizeof(*dict));
 }
 
