@@ -63,14 +63,30 @@ typedef void (*voidpfn)(void);
 #define popcnt16(x) __popcnt16(x)
 
 #define typeof(x) __typeof__(x)
-#define maxif(x) (0UL - (bool)(x))
-#define cl_align(x) __declspec(align(x))
+#define maxif(x) ((u64)0 - (bool)(x))
 #define cl_array_size(x) (sizeof(x)/sizeof(x[0]))
+
+
+#if _WIN32
+#define gcc_align(x)
+#define msvc_align(x) __declspec(align(x))
+#else
+#define gcc_align(x) __attribute__((aligned(x))
+#define msvc_align(x)
+#endif
 
 #define memb_to_struct(memb, memb_of, memb_name) \
 ((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
 
 #define memb_size(type, memb) sizeof(((type*)0)->memb)
+#define struct_memb(type, memb) (((type*)0)->memb)
+
+#define swap(a, b) \
+do { \
+typeof(a) m__swap_tmp = a; \
+a = b; \
+b = m__swap_tmp; \
+} while(0);
 
 #define for_bits(pos, count, mask) \
 for(count = 0, pos = (typeof(pos))ctz(mask); \
@@ -115,6 +131,14 @@ extern struct os {
 struct os_process {
     void *p,*t; // process and thread handle
 };
+
+#if _WIN32
+#define os_fd HANDLE
+#define OS_INVALID_FD INVALID_HANDLE_VALUE
+#else
+#define os_fd int
+#define OS_INVALID_FD -1
+#endif
 
 #define def_create_os(name) void name(void)
 def_create_os(create_os);
@@ -191,6 +215,22 @@ def_write_file(write_file);
 #define def_read_file(name) u64 name(char *uri, void *buf, u64 size)
 def_read_file(read_file);
 
+enum create_fd_flags {
+    CREATE_FD_READ = 0x01,
+    CREATE_FD_WRITE = 0x02,
+};
+#define def_create_fd(name) os_fd name(char *uri, u32 flags)
+def_create_fd(create_fd);
+
+#define def_destroy_fd(name) void name(os_fd fd)
+def_destroy_fd(destroy_fd);
+
+#define def_write_fd(name) u64 name(os_fd fd, void *buf, u64 size)
+def_write_fd(write_fd);
+
+#define def_read_fd(name) u64 name(os_fd fd, void *buf, u64 size)
+def_read_fd(read_fd);
+
 #define def_copy_file(name) int name(char *fnew, char *fold)
 def_copy_file(copy_file);
 
@@ -209,15 +249,6 @@ def_cmpftim(cmpftim);
 // print.h
 #define def_snprintf(name) u32 name(char *buf, u32 size, const char *fmt, ...)
 def_snprintf(scb_snprintf);
-
-#define strfmt(str, fmt, ...) scb_snprintf(str.data, (u32)str.size, fmt, __VA_ARGS__)
-#define memfmt(buf, sz, fmt, ...) scb_snprintf(buf, sz, fmt, __VA_ARGS__)
-
-#if DEBUG
-#define dbg_strfmt strfmt
-#else
-#define dbg_strfmt(...)
-#endif
 
 #define print(fmt, ...) \
 do { \
@@ -290,14 +321,70 @@ do { if (prec) log_os_error(__VA_ARGS__); } while(0);
 #define invalid_default_case log_error("Invalid default case")
 
 // math.h
-#define kb(x) ((x) * 1024UL)
-#define mb(x) (kb(x) * 1024UL)
-#define gb(x) (mb(x) * 1024UL)
+#define kb(x) ((x) * (u64)1024)
+#define mb(x) (kb(x) * (u64)1024UL)
+#define gb(x) (mb(x) * (u64)1024UL)
 
-#define secs_to_ms(x) ((x) * 1000)
+#define secs_to_ms(x) ((x) * (u64)1000)
+#define secs_to_ns(x) ((x) * (u64)1e9)
 
-struct rect_u32 { u32 w,h; };
-struct rect_s32 { s32 w,h; };
+struct offset_u32 { u32 x,y; };
+struct extent_u32 { u32 w,h; };
+struct rect_u32 {
+    struct offset_u32 ofs;
+    struct extent_u32 ext;
+};
+
+struct offset_s32 { s32 x,y; };
+struct extent_s32 { s32 w,h; };
+struct rect_s32 {
+    struct offset_s32 ofs;
+    struct extent_s32 ext;
+};
+
+struct offset_u16 { u16 x,y; };
+struct extent_u16 { u16 w,h; };
+struct rect_u16 {
+    struct offset_u16 ofs;
+    struct extent_u16 ext;
+};
+
+struct offset_s16 { s16 x,y; };
+struct extent_s16 { s16 w,h; };
+struct rect_s16 {
+    struct offset_s16 ofs;
+    struct extent_s16 ext;
+};
+
+struct offset_f32 { float x,y; };
+struct extent_f32 { float w,h; };
+struct rect_f32 {
+    struct offset_f32 ofs;
+    struct extent_f32 ext;
+};
+
+#define OFFSET(type, ofs_x, ofs_y) ((struct offset_ ## type) {.x = (type)(ofs_x), .y = (type)(ofs_y)})
+#define EXTENT(type, ext_w, ext_h) ((struct extent_ ## type) {.w = (type)(ext_w), .h = (type)(ext_h)})
+#define CAST_OFFSET(type, ofs) ((struct offset_ ## type) {.x = (type)(ofs.x), .y = (type)(ofs.y)})
+#define CAST_EXTENT(type, ext) ((struct extent_ ## type) {.w = (type)(ext.w), .h = (type)(ext.h)})
+#define RECT(type, o, e) ((struct rect_ ## type) {.ofs = o, .ext = e})
+
+#define rect_clamp(rect, lim) \
+do { \
+if (rect.ofs.x < lim.ofs.x) rect.ofs.x = lim.ofs.x; \
+if (rect.ofs.y < lim.ofs.y) rect.ofs.y = lim.ofs.y; \
+if (rect.ext.w > lim.ext.w) rect.ext.w = lim.ext.w; \
+if (rect.ext.h > lim.ext.h) rect.ext.h = lim.ext.h; \
+} while(0)
+
+struct rgba { u8 r,g,b,a; };
+#define RGBA(red,green,blue,alpha) ((struct rgba) {.r = red, .g = green, .b = blue, .a = alpha})
+
+static inline void rgb_copy(struct rgba *to, struct rgba *from) {
+    to->r = from->r;
+    to->g = from->g;
+    to->b = from->b;
+}
 
 static inline bool is_pow2(u64 x)
 {
@@ -340,6 +427,75 @@ static inline u32 log2_u32(u32 x)
     return c;
 }
 
+static inline f32 circle(f32 x, f32 r, f32 h, f32 k)
+{
+    return sqrtf(r*r - (x-h)*(x-h)) + k;
+}
+
+static inline u32 fill_rect_simple(struct rect_u32 r, struct offset_u32 *ret)
+{
+    u32 cnt = 0;
+    for(u32 j=r.ofs.y; j < r.ofs.y + r.ext.h; ++j) {
+        for(u32 i = r.ofs.x; i < r.ofs.x + r.ext.w; ++i)
+            ret[cnt++] = OFFSET(u32, i, j);
+    }
+    return cnt;
+}
+
+// the rectangle is drawn around the vector pos_1 - pos_2
+static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u32 width, struct offset_u32 *ret)
+{
+    if (pos_1.x == pos_2.x &&
+        pos_1.y == pos_2.y)
+    {
+        ret[0] = pos_1;
+        return 1;
+    }
+    
+    if (pos_1.x == pos_2.x) {
+        u32 y1 = pos_1.y, y2 = pos_2.y;
+        if (y1 > y2) swap(y1, y2);
+        struct rect_u32 = RECT(u32, OFFSET(u32, pos_1.x, y1), EXTENT(u32, width, y2-y1));
+        return fill_rect_simple(rect, ret);
+    } else if (pos_1.y == pos_2.y) {
+        u32 x1 = pos_1.x, x2 = pos_2.x;
+        if (x1 > x2) swap(x1, x2);
+        struct rect_u32 = RECT(u32, OFFSET(u32, x1, pos_1.y), EXTENT(u32, x2-x1, width));
+        return fill_rect_simple(rect, ret);
+    }
+    
+    struct offset_s32 vec;
+    if (pos_1.y > pos_2.y) {
+        vec = pos_1;
+        pos_1 = pos_2;
+        pos_2 = vec;
+    }
+    vec.y = pos_2.y - pos_1.y;
+    vec.x = pos_2.x - pos_1.x;
+    
+    float m = vec.y / vec.x;
+    
+    struct offset_u32 p1,p2,p3,p4;
+    if (vec.x < 0) {
+    } else {
+    }
+    
+}
+
+static inline u32 fill_circle(s32 r, u32 h, u32 k, struct offset_u32 *ret)
+{
+    u32 cnt = 0;
+    for(s32 j = -r; j < r; ++j) {
+        for(s32 i = -r; i < r; ++i) {
+            if (i*i + j*j > r*r)
+                continue;
+            ret[cnt] = OFFSET(u32, i + h, j + k);
+            ++cnt;
+        }
+    }
+    return cnt;
+}
+
 static inline u64 set_add(u64 set, u64 i)
 {
     log_error_if(i > 64, "Trying to add %u to a set which only holds 64", i);
@@ -349,6 +505,830 @@ static inline u64 set_add(u64 set, u64 i)
 static inline bool set_test(u64 set, u64 i)
 {
     return set & ((u64)1 << i);
+}
+
+// vec.h
+
+// @Todo Idk if this is too big/too small. Same magnitude as used in test.c.
+#define FLOAT_ERROR 0.000001
+
+static inline bool feq(float a, float b)
+{
+    return fabsf(a - b) < FLOAT_ERROR;
+}
+
+static inline float lerp(float a, float b, float c)
+{
+    return a + c * (b - a);
+}
+
+static inline float clamp(float num, float min, float max)
+{
+    if (num > max)
+        num = max;
+    else if (num < min)
+        num = min;
+    return num;
+}
+
+#define PI 3.1415926f
+#define PI_OVER_180 0.01745329f
+
+static inline float radf(float x) {
+    return x * PI_OVER_180;
+}
+
+typedef msvc_align(16) struct {
+    float x,y,z,w;
+} vector gcc_align(16);
+
+// should be constructed as:
+//     bottom left near, bottom left far, bottom right far, bottom right near,
+//     top left near, top left far, top right far, top right near,
+struct box {
+    vector p[8];
+};
+
+static inline void get_box(vector bln, vector blf, vector brf, vector brn,
+                           vector tln, vector tlf, vector trf, vector trn, struct box *b)
+{
+    b->p[0] = bln; b->p[1] = blf; b->p[2] = brf; b->p[3] = brn;
+    b->p[4] = tln; b->p[5] = tlf; b->p[6] = trf; b->p[7] = trn;
+}
+
+struct trs {
+    vector t;
+    vector r;
+    vector s;
+};
+
+typedef msvc_align(16) struct matrix {
+    float m[16];
+} matrix gcc_align(16);
+
+struct triangle_f32 {
+    vector p[3];
+};
+
+// glsl compatibility for cpu interactive structs
+#define vec4 vector
+#define mat4 matrix
+
+static inline vector get_vector(float x, float y, float z, float w)
+{
+    return (vector) {.x = x, .y = y, .z = z, .w = w};
+}
+#define vector4(x, y, z, w) get_vector(x, y, z, w)
+#define vector3(x, y, z)    get_vector(x, y, z, 0)
+#define vector2(x, y)       get_vector(x, y, 0, 0)
+
+static inline void get_matrix(vector colx, vector coly, vector colz, vector colw, matrix *m)
+{
+    __m128 a = _mm_load_ps(&colx.x);
+    __m128 b = _mm_load_ps(&coly.x);
+    __m128 c = _mm_load_ps(&colz.x);
+    __m128 d = _mm_load_ps(&colw.x);
+    _mm_store_ps(&m->m[ 0], a);
+    _mm_store_ps(&m->m[ 4], b);
+    _mm_store_ps(&m->m[ 8], c);
+    _mm_store_ps(&m->m[12], d);
+}
+#define matrix4(x, y, z, w, m) get_matrix(x, y, z, w, m)
+#define matrix3(x, y, z, m) get_matrix(x, y, z, (vector){0}, m)
+
+static inline void load_count_matrices_ua(u32 count, float *from, matrix *to)
+{
+    for(u32 i=0; i < count; ++i)
+        matrix4(vector4(from[i*16+ 0], from[i*16+ 1], from[i*16+ 2], from[i*16+ 3]),
+                vector4(from[i*16+ 4], from[i*16+ 5], from[i*16+ 6], from[i*16+ 7]),
+                vector4(from[i*16+ 8], from[i*16+ 9], from[i*16+10], from[i*16+11]),
+                vector4(from[i*16+12], from[i*16+13], from[i*16+14], from[i*16+15]), &to[i]);
+}
+
+static inline vector vector3_w(vector v, float w)
+{
+    v.w = w;
+    return v;
+}
+
+static inline void get_trs(vector t, vector r, vector s, struct trs *trs)
+{
+    *trs = (struct trs) {
+        .t = t,
+        .r = r,
+        .s = s,
+    };
+}
+
+static inline void print_matrix(matrix *m)
+{
+    print("[\n");
+    const u32 cols[] = {0,4,8,12};
+    u32 i,j;
+    for(i=0;i<4;++i) {
+        print("    ");
+        for(j=0;j<4;++j)
+            print("%f, ", m->m[cols[j]+i]);
+        print("\n");
+    }
+    print("]\n");
+}
+
+static inline void print_vector(vector v)
+{
+    print("[%f, %f, %f, %f]", v.x, v.y, v.z, v.w);
+}
+
+static inline void println_vector(vector v)
+{
+    print("[%f, %f, %f, %f]\n", v.x, v.y, v.z, v.w);
+}
+
+static inline void print_box(struct box *b)
+{
+    for(u32 i=0; i < cl_array_size(b->p) / 2; ++i) {
+        if (i == 0) {
+            print_vector(b->p[i]); print(" | box %uh", b);
+        } else {
+            println_vector(b->p[i]);
+        }
+    }
+}
+
+static inline void array_to_vector(float *arr, vector v)
+{
+    memcpy(&v, arr, sizeof(*arr) * 4);
+}
+
+static inline vector scalar_mul_vector(vector v, float s)
+{
+    __m128 a = _mm_load_ps(&v.x);
+    __m128 b = _mm_set1_ps(s);
+    a = _mm_mul_ps(a,b);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+#define scale_vector(v, s) scalar_mul_vector(v, s)
+
+static inline vector scalar_div_vector(vector v, float s)
+{
+    __m128 a = _mm_load_ps(&v.x);
+    __m128 b = _mm_set1_ps(s);
+    a = _mm_div_ps(a,b);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+
+static inline vector mul_vector(vector v1, vector v2)
+{
+    __m128 a = _mm_load_ps(&v1.x);
+    __m128 b = _mm_load_ps(&v2.x);
+    a = _mm_mul_ps(a,b);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+
+static inline vector div_vector(vector v1, vector v2)
+{
+    __m128 a = _mm_load_ps(&v1.x);
+    __m128 b = _mm_load_ps(&v2.x);
+    a = _mm_div_ps(a,b);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+
+static inline float sq_vector(vector v)
+{
+    v = mul_vector(v, v);
+    return v.x + v.y + v.z + v.w;
+}
+
+static inline float dot(vector v1, vector v2)
+{
+    vector v3 = mul_vector(v1, v2);
+    return v3.x + v3.y + v3.z + v3.w;
+}
+
+// w component returned as 0
+static inline vector cross(vector p, vector q)
+{
+    vector ret;
+    ret.x = p.y * q.z - p.z * q.y;
+    ret.y = p.z * q.x - p.x * q.z;
+    ret.z = p.x * q.y - p.y * q.x;
+    ret.w = 0;
+    return ret;
+}
+
+static inline vector add_vector(vector v1, vector v2)
+{
+    __m128 a = _mm_load_ps(&v1.x);
+    __m128 b = _mm_load_ps(&v2.x);
+    a = _mm_add_ps(a,b);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+
+static inline vector sub_vector(vector v1, vector v2)
+{
+    __m128 a = _mm_load_ps(&v1.x);
+    __m128 b = _mm_load_ps(&v2.x);
+    a = _mm_sub_ps(a,b);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+
+static inline float vector_len(vector v) {
+    __m128 a = _mm_load_ps(&v.x);
+    __m128 b = a;
+    a = _mm_mul_ps(a,b);
+    float *f = (float*)&a;
+    return sqrtf(f[0] + f[1] + f[2]);
+}
+#define magnitude_vector(v) vector_len(v)
+
+static inline vector normalize(vector v) {
+    float f = vector_len(v);
+    return scalar_div_vector(v, f);
+}
+
+static inline vector lerp_vector(vector a, vector b, float c) {
+    vector ret;
+    ret = sub_vector(b, a);
+    ret = scalar_mul_vector(ret, c);
+    return add_vector(a, ret);
+}
+
+// angle in radians
+static inline vector quaternion(float angle, vector v)
+{
+    v = normalize(v);
+    float f = angle/2;
+    float sf = sinf(f);
+    vector r;
+    __m128 a;
+    __m128 b;
+    a = _mm_load_ps(&v.x);
+    b = _mm_set1_ps(sf);
+    a = _mm_mul_ps(a, b);
+    _mm_store_ps(&r.x, a);
+    r.w = cosf(f);
+    return r;
+}
+
+static inline vector invert_quaternion(vector q)
+{
+    return vector4(-q.x, -q.y, -q.z, q.w);
+}
+
+// equivalent to applying rotation q2, followed by rotation q1
+static inline vector hamilton_product(vector q1, vector q2)
+{
+#if 0
+    return (vector) {
+        .x = q1.w * q2.x + q1.x * q2.w + q1.y * q2.z - q1.z * q2.y,
+        .y = q1.w * q2.y - q1.x * q2.z + q1.y * q2.w + q1.z * q2.x,
+        .z = q1.w * q2.z + q1.x * q2.y - q1.y * q2.x + q1.z * q2.w,
+        .w = q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z,
+    };
+#endif
+    
+    __m128 a,b,c,d,e;
+    
+    a = _mm_load_ps(&q2.x);
+    
+    b = _mm_set_ps1(q1.w);
+    c = _mm_set_ps1(q1.x);
+    d = _mm_set_ps1(q1.y);
+    e = _mm_set_ps1(q1.z);
+    
+    b = _mm_mul_ps(a,b);
+    c = _mm_mul_ps(a,c);
+    d = _mm_mul_ps(a,d);
+    e = _mm_mul_ps(a,e);
+    
+    vector x,y,z,w;
+    _mm_store_ps(&w.x, b);
+    _mm_store_ps(&x.x, c);
+    _mm_store_ps(&y.x, d);
+    _mm_store_ps(&z.x, e);
+    
+    return (vector) { // @Optimise This could likely be done better, idk.
+        .x = w.x + x.w + y.z - z.y,
+        .y = w.y - x.z + y.w + z.x,
+        .z = w.z + x.y - y.x + z.w,
+        .w = w.w - x.x - y.y - z.z,
+    };
+}
+#define mul_quaternion(p, q) hamilton_product(p, q)
+
+// rotate like the inverse of a rotation matrix (like a view matrix)
+static inline vector rotate_active(vector p, vector q)
+{
+    vector v = hamilton_product(hamilton_product(invert_quaternion(q), p), q);
+    return vector3(v.x, v.y, v.z);
+}
+
+// rotate like a rotation matrix
+static inline vector rotate_passive(vector p, vector q)
+{
+    vector v = hamilton_product(hamilton_product(q, p), invert_quaternion(q));
+    return vector3(v.x, v.y, v.z);
+}
+
+// rotate axis of rotation of p by q
+static inline vector rotate_quaternion_axis(vector p, vector q)
+{
+    vector v = vector3(p.x, p.y, p.z);
+    v = rotate_passive(p, q);
+    return vector4(v.x, v.y, v.z, p.w);
+}
+
+static inline float quaternion_angle(vector q)
+{
+    return acosf(q.w) * 2;
+}
+
+static inline vector quaternion_axis(vector q)
+{
+    float a = quaternion_angle(q);
+    vector r = scalar_div_vector(q, sinf(a/2));
+    r.w = 0;
+    return r;
+}
+
+static inline void copy_matrix(matrix *to, matrix *from)
+{
+    __m128i a = _mm_load_si128((__m128i*)(from->m+0));
+    __m128i b = _mm_load_si128((__m128i*)(from->m+4));
+    __m128i c = _mm_load_si128((__m128i*)(from->m+8));
+    __m128i d = _mm_load_si128((__m128i*)(from->m+12));
+    _mm_store_si128((__m128i*)(to->m+0),a);
+    _mm_store_si128((__m128i*)(to->m+4),b);
+    _mm_store_si128((__m128i*)(to->m+8),c);
+    _mm_store_si128((__m128i*)(to->m+12),d);
+}
+
+static inline void identity_matrix(matrix *m)
+{
+    __m128 a = _mm_set_ps(0,0,0,1);
+    __m128 b = _mm_set_ps(0,0,1,0);
+    __m128 c = _mm_set_ps(0,1,0,0);
+    __m128 d = _mm_set_ps(1,0,0,0);
+    _mm_store_ps(m->m+ 0, a);
+    _mm_store_ps(m->m+ 4, b);
+    _mm_store_ps(m->m+ 8, c);
+    _mm_store_ps(m->m+12, d);
+}
+
+// @Optimise Idk if using a global here is faster than initializing the matrix.
+// When I was testing this, my testing was majorly flawed.
+matrix IDENTITY_MATRIX = {
+    .m = {
+        1,0,0,0,
+        0,1,0,0,
+        0,0,1,0,
+        0,0,0,1,
+    },
+};
+
+inline static bool is_ident(matrix *m)
+{
+    return memcmp(m, &IDENTITY_MATRIX, sizeof(*m)) == 0;
+}
+
+// @Optimise It looks like letting the compiler decide how to init stuff is
+// better. See above implementation of identity_matrix
+static inline void count_identity_matrix(u32 count, matrix *m)
+{
+    __m128 a = _mm_set_ps(0,0,0,1);
+    __m128 b = _mm_set_ps(0,0,1,0);
+    __m128 c = _mm_set_ps(0,1,0,0);
+    __m128 d = _mm_set_ps(1,0,0,0);
+    for(u32 i = 0; i < count; ++i) {
+        _mm_store_ps((m[i].m+0), a);
+        _mm_store_ps((m[i].m+4), b);
+        _mm_store_ps((m[i].m+8), c);
+        _mm_store_ps((m[i].m+12), d);
+    }
+}
+
+static inline void count_invert_y_identity_matrix(u32 count, matrix *m)
+{
+    __m128 a = _mm_set_ps(0,0,0,1);
+    __m128 b = _mm_set_ps(0,0,-1,0);
+    __m128 c = _mm_set_ps(0,1,0,0);
+    __m128 d = _mm_set_ps(1,0,0,0);
+    for(u32 i = 0; i < count; ++i) {
+        _mm_store_ps((m[i].m+0), a);
+        _mm_store_ps((m[i].m+4), b);
+        _mm_store_ps((m[i].m+8), c);
+        _mm_store_ps((m[i].m+12), d);
+    }
+}
+
+static inline void scale_matrix(vector v, matrix *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->m[0] = v.x;
+    m->m[5] = v.y;
+    m->m[10] = v.z;
+    m->m[15] = 1;
+}
+
+static inline void translation_matrix(vector v, matrix *m)
+{
+    identity_matrix(m);
+    m->m[12] = v.x;
+    m->m[13] = v.y;
+    m->m[14] = v.z;
+}
+
+static inline void rotation_matrix(vector r, matrix *m)
+{
+    __m128 a = _mm_load_ps(&r.x);
+    __m128 b = a;
+    a = _mm_mul_ps(a,b);
+    float *f = (float*)&a;
+    
+    float xy = 2 * r.x * r.y;
+    float xz = 2 * r.x * r.z;
+    float yz = 2 * r.y * r.z;
+    float wx = 2 * r.w * r.x;
+    float wy = 2 * r.w * r.y;
+    float wz = 2 * r.w * r.z;
+    
+    identity_matrix(m);
+    
+    m->m[0] = f[3] + f[0] - f[1] - f[2];
+    m->m[4] = xy - wz;
+    m->m[8] = xz + wy;
+    
+    m->m[1] = xy + wz;
+    m->m[5] = f[3] - f[0] + f[1] - f[2];
+    m->m[9] = yz - wx;
+    
+    m->m[2] = xz - wy;
+    m->m[6] = yz + wx;
+    m->m[10] = f[3] - f[0] - f[1] + f[2];
+    
+    m->m[15] = 1;
+}
+
+static inline void mul_matrix(matrix *x, matrix *y, matrix *z)
+{
+    u32 cols[] = {0,4,8,12};
+    __m128 a;
+    __m128 b;
+    float *f = (float*)&b;
+    matrix m;
+    u32 i,j;
+    for(i=0;i<4;++i) {
+        a = _mm_set_ps(x->m[12+i],x->m[8+i],x->m[4+i],x->m[0+i]);
+        for(j=0;j<4;++j) {
+            b = _mm_load_ps(y->m + 4*j);
+            b = _mm_mul_ps(a,b);
+            m.m[cols[j]+i] = f[0]+f[1]+f[2]+f[3];
+        }
+    }
+    copy_matrix(z,&m);
+}
+
+static inline void convert_trs(struct trs *trs, matrix *ret)
+{
+    matrix t,r,s;
+    translation_matrix(trs->t, &t);
+    rotation_matrix(trs->r, &r);
+    scale_matrix(trs->s, &s);
+    mul_matrix(&t,&r,&r);
+    mul_matrix(&r,&s,ret);
+}
+
+static inline void scalar_mul_matrix(matrix *m, float f)
+{
+    __m128 a = _mm_load_ps((m->m+0));
+    __m128 b = _mm_load_ps((m->m+4));
+    __m128 c = _mm_load_ps((m->m+8));
+    __m128 d = _mm_load_ps((m->m+12));
+    __m128 e = _mm_set1_ps(f);
+    a = _mm_mul_ps(a,e);
+    b = _mm_mul_ps(b,e);
+    c = _mm_mul_ps(c,e);
+    d = _mm_mul_ps(d,e);
+    _mm_store_ps((m->m+0),a);
+    _mm_store_ps((m->m+4),b);
+    _mm_store_ps((m->m+8),c);
+    _mm_store_ps((m->m+12),d);
+    m->m[15] = 1;
+}
+
+static inline vector mul_matrix_vector(matrix *m, vector p)
+{
+    __m128 a;
+    __m128 b;
+    __m128 c;
+    
+    a = _mm_load_ps(m->m + 0);
+    b = _mm_set1_ps(p.x);
+    c = _mm_mul_ps(a, b);
+    
+    a = _mm_load_ps(m->m + 4);
+    b = _mm_set1_ps(p.y);
+    a = _mm_mul_ps(a, b);
+    c = _mm_add_ps(a, c);
+    
+    a = _mm_load_ps(m->m + 8);
+    b = _mm_set1_ps(p.z);
+    a = _mm_mul_ps(a, b);
+    c = _mm_add_ps(a, c);
+    
+    a = _mm_load_ps(m->m + 12);
+    b = _mm_set1_ps(p.w);
+    a = _mm_mul_ps(a, b);
+    c = _mm_add_ps(a, c);
+    
+    // float *f = (float*)&c;
+    // return get_vector(f[0], f[1], f[2], f[3]);
+    vector v;
+    _mm_store_ps(&v.x, c);
+    
+    return v;
+}
+
+static inline void transpose(matrix *m)
+{
+    u32 cols[] = {0, 4, 8, 12};
+    int cnt = -1;
+    matrix t;
+    for(u32 i=0; i < 16; ++i) {
+        cnt += (i & 3) == 0;
+        t.m[cols[i & 3] + cnt] = m->m[i];
+    }
+    copy_matrix(m, &t);
+}
+
+// Inverts a 3x3
+static inline bool invert(matrix *x, matrix *y)
+{
+    float msvc_align(16) m[3][8] gcc_align(16);
+    memset(m, 0, sizeof(m));
+    
+    m[0][0] = x->m[0]; m[1][0] = x->m[4]; m[2][0] = x->m[ 8];
+    m[0][1] = x->m[1]; m[1][1] = x->m[5]; m[2][1] = x->m[ 9];
+    m[0][2] = x->m[2]; m[1][2] = x->m[6]; m[2][2] = x->m[10];
+    
+    m[0][3] = 1; m[0][4] = 0; m[0][5] = 0;
+    m[1][3] = 0; m[1][4] = 1; m[1][5] = 0;
+    m[2][3] = 0; m[2][4] = 0; m[2][5] = 1;
+    
+    __m128 a,b,c,d,e,f,g;
+    
+    for(u32 j=0; j < 3; ++j) {
+        float max = 0;
+        u32 r = Max_u32;
+        for(u32 row=j; row < 3; ++row)
+            if (fabs(m[row][j]) > max) {
+            max = fabsf(m[row][j]);
+            r = row;
+        }
+        
+        if (feq(max, 0))
+            return false;
+        
+        a = _mm_load_ps(m[j] + 0);
+        b = _mm_load_ps(m[j] + 4);
+        
+        if (r != j) {
+            c = _mm_load_ps(m[r] + 0);
+            d = _mm_load_ps(m[r] + 4);
+            // @Optimise I feel that I can remove half these stores by avoiding
+            // loading the same data later...
+            _mm_store_ps(m[r] + 0, a);
+            _mm_store_ps(m[r] + 4, b);
+            _mm_store_ps(m[j] + 0, c);
+            _mm_store_ps(m[j] + 4, d);
+            a = c;
+            b = d;
+        }
+        
+        e = _mm_set1_ps(1 / m[j][j]);
+        a = _mm_mul_ps(a, e);
+        b = _mm_mul_ps(b, e);
+        _mm_store_ps(m[j] + 0, a);
+        _mm_store_ps(m[j] + 4, b);
+        
+        for(r=0; r < 3; ++r) {
+            if (r == j)
+                continue;
+            
+            e = _mm_set1_ps(-m[r][j]);
+            f = _mm_mul_ps(e, a);
+            g = _mm_mul_ps(e, b);
+            c = _mm_load_ps(m[r] + 0);
+            d = _mm_load_ps(m[r] + 4);
+            c = _mm_add_ps(c, f);
+            d = _mm_add_ps(d, g);
+            _mm_store_ps(m[r] + 0, c);
+            _mm_store_ps(m[r] + 4, d);
+        }
+    }
+    
+    matrix3(vector3(m[0][3], m[0][4], m[0][5]),
+            vector3(m[1][3], m[1][4], m[1][5]),
+            vector3(m[2][3], m[2][4], m[2][5]), y);
+    
+    return true;
+}
+
+static inline void invert_transform(matrix *m, matrix *r)
+{
+    matrix t;
+    invert(m, &t);
+    t.m[12] = -m->m[12];
+    t.m[13] = -m->m[13];
+    t.m[14] = -m->m[14];
+    t.m[15] = 1;
+    *r = t;
+}
+
+static inline void view_matrix(vector pos, vector dir, vector up, matrix *m)
+{
+    vector w = normalize(up);
+    vector d = normalize(dir);
+    vector r = normalize(cross(d, w));
+    vector u = normalize(cross(r, d));
+    
+    matrix rot;
+    matrix3(vector3(r.x, u.x, -d.x),
+            vector3(r.y, u.y, -d.y),
+            vector3(r.z, u.z, -d.z), &rot);
+    
+    rot.m[15] = 1;
+    
+    matrix trn;
+    translation_matrix(scale_vector(pos, -1), &trn);
+    
+    mul_matrix(&rot, &trn, m);
+}
+
+static inline void move_to_camera(vector pos, vector dir, vector up, matrix *m)
+{
+    vector w = normalize(up);
+    vector d = normalize(dir);
+    vector r = normalize(cross(d, w));
+    vector u = normalize(cross(r, d));
+    
+    matrix rot;
+    matrix3(vector3( r.x,  r.y,  r.z),
+            vector3( u.x,  u.y,  u.z),
+            vector3(-d.x, -d.y, -d.z), &rot);
+    
+    rot.m[15] = 1;
+    
+    matrix trn;
+    translation_matrix(pos, &trn);
+    
+    mul_matrix(&trn, &rot, m);
+}
+
+static inline float focal_length(float fov)
+{
+    return 1 / tanf(fov / 2);
+}
+
+// args: horizontal fov, aspect ratio, near plane, far plane
+static inline void perspective_matrix(float fov, float a, float n, float f, matrix *m)
+{
+    float e = focal_length(fov);
+    
+    float l = -n / e;
+    float r = n / e;
+    float t = (a * n) / e;
+    float b = -(a * n) / e;
+    
+    memset(m, 0, sizeof(*m));
+    m->m[0] = (2 * n) / (r - l);
+    m->m[5] = -(2 * n) / (t - b); // negate because Vulkan
+    m->m[8] = (r + l) / (r - l);
+    m->m[9] = (t + b) / (t - b);
+    m->m[10] = -f / (f - n);
+    m->m[11] = -1;
+    m->m[14] = -(n * f) / (f - n);
+}
+
+// t should be y min and b y max because vulkan screen orientation
+static inline void ortho_matrix(float l, float r, float b, float t,
+                                float n, float f, matrix *m)
+{
+    matrix4(vector4(2.0f / (r-l), 0.0f, 0.0f,  0.0f),
+            vector4(0.0f, 2.0f / (t-b), 0.0f,  0.0f), // do not flip, values are passed in flipped
+            vector4(0.0f, 0.0f, -1 / (f-n), 0.0f),
+            vector4(-(r+l) / (r-l), -(t+b) / (t-b), -(f+n) / (2 * (f-n)) + 0.5f, 1.0f),
+            m);
+}
+
+static inline float dist_point_line(vector p, vector s, vector v)
+{
+    float q = sq_vector(sub_vector(p, s));
+    float r = powf(dot(sub_vector(p, s), v), 2.0f);
+    float d = powf(magnitude_vector(v), 2.0f);
+    
+    // the sqrtf will nan if this is true because float error gives a negative
+    if (feq(q - r / d, 0.0f))
+        return 0.0f;
+    
+    return sqrtf(q - r / d);
+}
+
+static inline bool point_on_line(vector p, vector s, vector v)
+{
+    return feq(dist_point_line(p, s, v), 0);
+}
+
+enum { INTERSECT, LIES_IN, PARALLEL, };
+static inline int intersect_line_plane(vector p, vector s, vector v, vector *ret)
+{
+    {
+        vector n = normalize(vector3(p.x, p.y, p.z));
+        if (feq(dot(n, v), 0)) {
+            if (feq(dot(n, s) + p.w, 0))
+                return LIES_IN;
+            else
+                return PARALLEL;
+        }
+    }
+    
+    s.w = 1;
+    v.w = 0;
+    float t = -dot(p, s) / dot(p, v);
+    
+    s.w = 0;
+    *ret = add_vector(s, scale_vector(v, t));
+    
+    return INTERSECT;
+}
+
+// point of intersection of three planes, does not check det == 0
+static inline vector intersect_three_planes(vector l1, vector l2, vector l3)
+{
+    matrix m;
+    matrix3(vector3(l1.x, l2.x, l3.x), vector3(l1.y, l2.y, l3.y), vector3(l1.z, l2.z, l3.z), &m);
+    
+    if (!invert(&m, &m)) {
+        print_matrix(&m);
+        log_error("matrix is not invertible");
+    }
+    
+    vector d = vector3(-l1.w, -l2.w, -l3.w);
+    return mul_matrix_vector(&m, d);
+}
+
+// find the point of intersection of two planes l1 and l2, q1 and q2 are points on the respective planes
+static inline vector intersect_two_planes_point(vector l1, vector l2, vector q1, vector q2)
+{
+    matrix m;
+    vector v,q,d;
+    float d1,d2;
+    
+    d1 = dot(vector3(-l1.x, -l1.y, -l1.z), vector3(q1.x, q1.y, q1.z));
+    d2 = dot(vector3(-l2.x, -l2.y, -l2.z), vector3(q2.x, q2.y, q2.z));
+    
+    v = cross(l1, l2);
+    d = vector3(-d1, -d2, 0);
+    matrix3(vector3(l1.x, l2.x, v.x), vector3(l1.y, l2.y, v.y), vector3(l1.z, l2.z, v.z), &m);
+    
+    if (!invert(&m, &m)) {
+        print_matrix(&m);
+        log_error("matrix is not invertible");
+    }
+    
+    q = mul_matrix_vector(&m, d);
+    
+    return add_vector(q, scale_vector(v, -dot(v, q) / dot(v, v)));
+}
+
+static inline vector gram_schmidt(vector n, vector t)
+{
+    float d = dot(n,t);
+    __m128 a = _mm_load_ps(&n.x);
+    __m128 b = _mm_load_ps(&t.x);
+    __m128 c = _mm_set1_ps(d);
+    a = _mm_mul_ps(a,c);
+    a = _mm_sub_ps(b,a);
+    vector r;
+    _mm_store_ps(&r.x, a);
+    return r;
+}
+
+static inline float tangent_handedness(vector n, vector t1, vector t2)
+{
+    return dot(cross(n,t1),t2) > 0.0f ? 1.0f : -1.0f;
 }
 
 // list.h
@@ -510,6 +1490,10 @@ def_allocator_used(arena_used, arena);
 def_deallocate(linear_deallocate, linear);
 def_deallocate(arena_deallocate, arena);
 
+#define def_reset_allocator(name, type) void name(type ## _t *alloc)
+def_reset_allocator(reset_linear_allocator, linear);
+def_reset_allocator(reset_arena_allocator, arena);
+
 #define def_destroy_allocator(name, type) void name(type ## _t *alloc)
 def_destroy_allocator(destroy_linear, linear);
 def_destroy_allocator(destroy_arena, arena);
@@ -570,6 +1554,16 @@ static inline def_reallocate(reallocate, allocator)
     return NULL;
 }
 
+static inline def_reset_allocator(reset_allocator, allocator)
+{
+    switch(alloc->type) {
+        case TYPE_LINEAR: return reset_linear_allocator(&alloc->linear);
+        case TYPE_ARENA: return reset_arena_allocator(&alloc->arena);
+        default: invalid_default_case;
+    }
+    return NULL;
+}
+
 static inline def_deallocate(deallocate, allocator)
 {
     switch(alloc->type) {
@@ -588,6 +1582,10 @@ static inline def_destroy_allocator(destroy_allocator, allocator)
     }
 }
 
+// ringbuffer.h
+
+/* I will implement this eventually, but it is sooooo cancer on Windows */
+
 // string.h
 struct string {
     u64 size;
@@ -595,6 +1593,7 @@ struct string {
 };
 #define STR(cstr) ((struct string) { .data = (cstr), .size = strlen(cstr) })
 #define CLSTR(buf) ((struct string) { .data = (buf), .size = sizeof(buf) })
+#define create_string(d, sz) ((struct string) {.data = d, .size = sz})
 
 typedef struct string_buffer {
     u64 size;
@@ -638,6 +1637,25 @@ def_destroy_string_array(destroy_string_array);
 #define def_strfind(name) u32 name(struct string sf, struct string si)
 def_strfind(strfind);
 
+#define def_strfindchar(name) u32 name(struct string si, char c)
+def_strfindchar(strfindchar);
+
+typedef struct charset { u64 set[2]; } charset_t;
+
+#define create_charset() ((charset_t) {});
+
+#define def_charset_add(name) int name(charset_t *set, char c)
+def_charset_add(charset_add);
+
+#define def_charset_test(name) bool name(charset_t set, char c)
+def_charset_test(charset_test);
+
+#define def_charset_invert(name) void name(charset_t *set)
+def_charset_invert(charset_invert);
+
+#define def_strfindcharset(name) u32 name(struct string sf, charset_t set)
+def_strfindcharset(strfindc);
+
 #define def_flatten_pchar_array(name) struct string name(char *arr[], u32 arr_sz, char *buf, u32 buf_sz, char sep)
 def_flatten_pchar_array(flatten_pchar_array);
 
@@ -648,6 +1666,22 @@ static inline u64 scb_strcpy(struct string to, struct string from) {
 static inline u64 strbufcpy(void *buf, u64 buf_sz, struct string from) {
     return trunc_copy(buf, buf_sz, from.data, from.size);
 }
+
+#define strfmt(str, fmt, ...) scb_snprintf(str.data, (u32)str.size, fmt, __VA_ARGS__)
+#define memfmt(buf, sz, fmt, ...) scb_snprintf(buf, sz, fmt, __VA_ARGS__)
+
+#ifdef DEBUG
+#define dbg_strcpy(...) strcpy(__VA_ARGS__)
+#define dbg_strbufcpy(...) strbufcpy(__VA_ARGS__)
+#define dbg_strfmt strfmt
+#else
+static inline void dbg_strcpy_stub(struct string str, ...) {}
+static inline void dbg_strbufcpy_stub(void *buf, ...) {}
+static inline void dbg_strfmt_stub(struct string str, ...) {}
+#define dbg_strcpy(...) dbg_strcpy_stub(__VA_ARGS__)
+#define dbg_strbufcpy(...) dbg_strbufcpy_stub(__VA_ARGS__)
+#define dbg_strfmt(...) dbg_strfmt_stub(__VA_ARGS__)
+#endif
 
 // array.h
 #define def_create_array_args(type) u64 size, allocator_t *alloc, type *array
@@ -674,6 +1708,23 @@ def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_re
 def_create_array(create_array);
 def_array_add(array_add);
 def_destroy_array(destroy_array);
+
+// large_set.h
+typedef struct large_set large_set_t;
+
+#define large_set_buffer_size(sz) ((align(sz, 64) >> 6) * sizeof(*struct_memb(large_set_t, masks)))
+
+#define def_create_large_set(name) int name(u64 size, u64 *buffer, allocator_t *alloc, large_set_t *set)
+#define def_destroy_large_set(name) void name(large_set_t set, allocator_t *alloc)
+#define def_large_set_add(name) void name(large_set_t set, u64 i)
+#define def_large_set_test(name) bool name(large_set_t set, u64 i)
+#define def_large_set_rm(name) void name(large_set_t set, u64 i)
+
+def_create_large_set(create_large_set);
+def_destroy_large_set(destroy_large_set);
+def_large_set_add(large_set_add);
+def_large_set_test(large_set_test);
+def_large_set_rm(large_set_rm);
 
 // dict.h
 typedef struct dict dict_t;
@@ -986,6 +2037,65 @@ def_read_file(read_file)
     return res;
 }
 
+def_create_fd(create_fd)
+{
+    os_fd fd;
+    if (flags == CREATE_FD_WRITE) {
+        fd = CreateFile(uri, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    } else if (flags == CREATE_FD_WRITE) {
+        fd = CreateFile(uri, GENERIC_READ, 0, NULL, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    } else {
+        fd = CreateFile(uri, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    
+    if (fd == INVALID_HANDLE_VALUE) {
+        log_os_error("Failed to get file handle");
+        return OS_INVALID_FD;
+    }
+    
+    return fd;
+}
+
+def_destroy_fd(destroy_fd)
+{
+    CloseHandle(fd);
+}
+
+def_write_fd(write_fd)
+{
+    u32 res = 0;
+    BOOL success = WriteFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
+    if (!success) {
+        log_os_error("Failed to write fd");
+        return FILE_ERROR;
+    }
+    return res;
+}
+
+def_read_fd(read_fd)
+{
+    if (!buf) {
+        u32 sz = GetFileSize(fd, NULL);
+        if (sz == INVALID_FILE_SIZE) {
+            log_error("Failed to get file size");
+            return FILE_ERROR;
+        }
+        return sz;
+    }
+    
+    u32 res;
+    BOOL success = ReadFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
+    if (!success) {
+        log_os_error("Failed to read fd");
+        return FILE_ERROR;
+    }
+    
+    return res;
+}
+
 def_copy_file(copy_file)
 {
     if (!CopyFile(fold, fnew, false)) {
@@ -1144,8 +2254,10 @@ def_pr_parse(pr_parse_s, char*)
 def_pr_parse(pr_parse_f, f64)
 {
     // TODO(SollyCB): Idk if I will ever get round to implementing this myself...
-    u32 bp = snprintf(buf, size, "%f", x);
-    return bp;
+    char tmp[128];
+    u32 bp = (u32)sprintf(tmp, "%f", x);
+    trunc_copy(buf, size, tmp, bp);
+    return bp < size ? bp : size;
 }
 
 def_pr_parse(pr_parse_c, char)
@@ -1398,6 +2510,11 @@ def_allocator_used(linear_used, linear)
     return alloc->used;
 }
 
+def_reset_allocator(reset_linear_allocator, linear)
+{
+    alloc->used = 0;
+}
+
 def_deallocate(linear_deallocate, linear)
 {
     u64 size = alloc_check_guard_and_get_size(p);
@@ -1491,6 +2608,15 @@ def_deallocate(arena_deallocate, arena)
 {
     struct arena_header *block = arena_find_block(alloc, p);
     arena_header_deallocate(alloc, block, p);
+}
+
+def_reset_allocator(reset_arena_allocator, arena)
+{
+    u32 count = alloc->block_count;
+    struct arena_header *block;
+    
+    list_for(block, &alloc->block_list, list, count)
+        reset_linear_allocator(&block->linear);
 }
 
 def_destroy_allocator(destroy_arena, arena)
@@ -1659,6 +2785,43 @@ def_strfind(strfind)
     return Max_u32;
 }
 
+def_strfindchar(strfindchar)
+{
+    for(u32 i=0; i < si.size; ++i) {
+        if (si.data[i] == c)
+            return i;
+    }
+    
+    return Max_u32;
+}
+
+def_charset_add(charset_add)
+{
+    int ret = set->set[c>>6] & ((u64)1 << (c & 63));
+    set->set[c>>6] |= (u64)1 << (c & 63);
+    return ret;
+}
+
+def_charset_test(charset_test)
+{
+    return set.set[c>>6] & ((u64)1 << (c & 63));
+}
+
+def_charset_invert(charset_invert)
+{
+    set->set[0] = ~set->set[0];
+    set->set[1] = ~set->set[1];
+}
+
+def_strfindcharset(strfindcharset)
+{
+    for(u32 i=0; i < sf.size; ++i) {
+        if (charset_test(set, sf.data[i]))
+            return i;
+    }
+    return Max_u32;
+}
+
 def_flatten_pchar_array(flatten_pchar_array)
 {
     struct string str = {.data = buf, .size = 0};
@@ -1732,6 +2895,50 @@ def_destroy_array(destroy_array)
     array_t *tmp = ((array_t*) *array) - 1;
     deallocate(tmp->alloc, tmp);
     *array = NULL;
+}
+
+// large_set.c
+struct large_set {
+    u64 *masks;
+};
+
+#define large_set_mask(i) ((u64)i >> 6)
+#define large_set_bit(i) ((u64)1 << ((u64)i & 63))
+
+def_create_large_set(create_large_set)
+{
+    u64 req_bytes = large_set_buffer_size(size);
+    if(buffer == NULL) {
+        log_error_if(alloc == NULL, "Failed to create large set: buffer is NULL, but so is allocator");
+        buffer = allocate(alloc, req_bytes);
+        if (buffer == NULL) {
+            log_error("Failed to allocate buffer for large set, size %u, required bytes %u", size, req_bytes);
+            return -1;
+        }
+    }
+    memset(buffer, 0, req_bytes);
+    set->masks = buffer;
+    return 0;
+}
+
+def_destroy_large_set(destroy_large_set)
+{
+    deallocate(alloc, set.masks);
+}
+
+def_large_set_add(large_set_add)
+{
+    set.masks[large_set_mask(i)] |= large_set_bit(i);
+}
+
+def_large_set_test(large_set_test)
+{
+    return set.masks[large_set_mask(i)] & large_set_bit(i);
+}
+
+def_large_set_rm(large_set_rm)
+{
+    set.masks[large_set_mask(i)] &= ~large_set_bit(i);
 }
 
 // dict.c
