@@ -442,6 +442,7 @@ static inline u32 fill_rect_simple(struct rect_u32 r, struct offset_u32 *ret)
     return cnt;
 }
 
+// @Todo - This is pretty close, but not quite working correctly...
 // the rectangle is drawn around the vector pos_1 - pos_2
 static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u32 width, struct offset_u32 *ret)
 {
@@ -452,46 +453,94 @@ static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u3
         return 1;
     }
     
+    if (pos_1.y > pos_2.y)
+        swap(pos_1, pos_2);
+    
     if (pos_1.x == pos_2.x) {
-        u32 y1 = pos_1.y, y2 = pos_2.y;
-        if (y1 > y2) swap(y1, y2);
-        struct rect_u32 = RECT(u32, OFFSET(u32, pos_1.x, y1), EXTENT(u32, width, y2-y1));
+        struct rect_u32 rect = RECT(u32, OFFSET(u32, pos_1.x, pos_1.y), EXTENT(u32, width, pos_2.y - pos_1.y));
         return fill_rect_simple(rect, ret);
     } else if (pos_1.y == pos_2.y) {
         u32 x1 = pos_1.x, x2 = pos_2.x;
         if (x1 > x2) swap(x1, x2);
-        struct rect_u32 = RECT(u32, OFFSET(u32, x1, pos_1.y), EXTENT(u32, x2-x1, width));
+        struct rect_u32 rect = RECT(u32, OFFSET(u32, x1, pos_1.y), EXTENT(u32, x2-x1, width));
         return fill_rect_simple(rect, ret);
     }
     
-    struct offset_s32 vec;
-    if (pos_1.y > pos_2.y) {
-        vec = pos_1;
-        pos_1 = pos_2;
-        pos_2 = vec;
-    }
-    vec.y = pos_2.y - pos_1.y;
-    vec.x = pos_2.x - pos_1.x;
-    
-    float m = vec.y / vec.x;
+    struct offset_s32 vec = OFFSET(s32, pos_2.x - pos_1.x, pos_2.y - pos_1.y);
+    float f = (f32)(width * width) / (vec.x*vec.x + vec.y*vec.y);
+    s32 sh_x = (s32)(vec.y * f);
+    s32 sh_y = (s32)(vec.x * f);
     
     struct offset_u32 p1,p2,p3,p4;
-    if (vec.x < 0) {
-    } else {
+    if (vec.x < 0) { // sh_y will be negative
+        p1 = OFFSET(u32, pos_1.x - sh_x, pos_1.y + sh_y);
+        p2 = OFFSET(u32, pos_1.x + sh_x, pos_1.y - sh_y);
+        p3 = OFFSET(u32, pos_2.x - sh_x, pos_2.y + sh_y);
+        p4 = OFFSET(u32, pos_2.x + sh_x, pos_2.y - sh_y);
+    } else { // sh_y will be positive
+        p1 = OFFSET(u32, pos_1.x + sh_x, pos_1.y - sh_y);
+        p2 = OFFSET(u32, pos_2.x + sh_x, pos_2.y - sh_y);
+        p3 = OFFSET(u32, pos_1.x - sh_x, pos_1.y + sh_y);
+        p4 = OFFSET(u32, pos_2.x - sh_x, pos_2.y + sh_y);
     }
     
+    if ((vec.x < 0 && p2.y > p3.y) ||
+        (vec.x > 0 && p2.y < p3.y))
+    {
+        swap(p2, p3);
+    }
+    
+    u32 h_top = vec.x < 0 ? p2.y - p1.y : p3.y - p1.y;
+    u32 h_mid = vec.x < 0 ? p3.y - p2.y : p2.y - p3.y;
+    u32 h_bot = vec.x < 0 ? p4.y - p3.y : p4.y - p2.y;
+    
+    u32 cnt = 0;
+    {
+        f32 d12 = ((f32)p2.x - p1.x) / (p2.y - p1.y);
+        f32 d13 = ((f32)p3.x - p1.x) / (p3.y - p1.y);
+        
+        u32 h = h_top;
+        f32 xbeg = d13;
+        f32 xend = d12;
+        
+        for(u32 y = 0; y < h; ++y, xbeg += d13, xend += d12) {
+            for(s32 x = (s32)xbeg; x < (s32)xend; ++x)
+                ret[cnt++] = OFFSET(u32, (u32)(x + p1.x), y + p1.y);
+        }
+    } {
+        f32 d = vec.x < 0 ? ((f32)p3.x - p1.x) / (p3.y - p1.y) : ((f32)p2.x - p1.x) / (p2.y - p1.y);
+        u32 h = h_mid;
+        
+        f32 xbeg = d;
+        f32 xend = d;
+        
+        for(u32 y = h_top; y < h + h_top; ++y, xbeg += d, xend += d) {
+            for(s32 x = (s32)xbeg; x < (s32)xend; ++x)
+                ret[cnt++] = OFFSET(u32, (u32)(x + p1.x), y + p1.y);
+        }
+    } {
+        f32 d24 = ((f32)p4.x - p2.x) / (p4.y - p2.y);
+        f32 d34 = ((f32)p4.x - p3.x) / (p4.y - p3.y);
+        
+        u32 h = h_bot;
+        f32 xbeg = d34;
+        f32 xend = d24;
+        
+        for(u32 y = h_mid + h_top; y < h + h_mid + h_top; ++y, xbeg += d34, xend += d24) {
+            for(s32 x = (s32)xbeg; x < (s32)xend; ++x)
+                ret[cnt++] = OFFSET(u32, (u32)(x + p1.x), y + p1.y);
+        }
+    }
+    return cnt;
 }
 
 static inline u32 fill_circle(s32 r, u32 h, u32 k, struct offset_u32 *ret)
 {
     u32 cnt = 0;
     for(s32 j = -r; j < r; ++j) {
-        for(s32 i = -r; i < r; ++i) {
-            if (i*i + j*j > r*r)
-                continue;
-            ret[cnt] = OFFSET(u32, i + h, j + k);
-            ++cnt;
-        }
+        s32 l = (s32)roundf(sqrtf((f32)r*r - j*j));
+        for(s32 i = -l; i < l; ++i)
+            ret[cnt++] = OFFSET(u32, i + h, j + k);
     }
     return cnt;
 }
