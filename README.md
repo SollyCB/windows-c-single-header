@@ -1,3 +1,7 @@
+Mote that the name does not mean that it is Windows only, I just started programming it using Windows.
+Eventually, I plan to remake this file from scratch when I feel that it too is too crufty and ugly. I already
+have a strong desire to rewrite it using the coding style used in the [raddebugger](https://github.com/EpicGamesExt/raddebugger), because that repo is so beautiful.
+
 # STB Style Single Header General Library
 
 I use as a drop in pseudo standard library, allowing for efficient and simple code reuse.
