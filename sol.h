@@ -6,10 +6,18 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <string.h>
-#include <intrin.h>
+#include <emmintrin.h>
 #include <assert.h>
 #include <math.h>
+
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
+#include <errno.h>
+#include <sys/mman.h>
+#include <sys/sysinfo.h>
+#endif
 
 #define SCB_OVERRIDE_STDLIB
 
@@ -50,29 +58,45 @@ typedef void (*voidpfn)(void);
 #define Max_u32 0xffffffff
 #define Max_u64 0xffffffffffffffff
 
+#ifdef _WIN32
 #define ctz(x)      _tzcnt_u64(x)
 #define ctz64(x)    _tzcnt_u64(x)
 #define ctz32(x)    _tzcnt_u32(x)
 #define ctz16(x)    _tzcnt_u16(x)
 #define clz(x)      __lzcnt64(x)
-#define clz16(x)    __lzcnt16(x)
-#define clz32(x)    __lzcnt(x)
 #define clz64(x)    __lzcnt64(x)
+#define clz32(x)    __lzcnt(x)
+#define clz16(x)    __lzcnt16(x)
 #define popcnt(x)   __popcnt64(x)
 #define popcnt64(x) __popcnt64(x)
 #define popcnt32(x) __popcnt32(x)
 #define popcnt16(x) __popcnt16(x)
+#else
+#define ffs(x)      __builtin_ffsl(x)
+#define ffs32(x)    __builtin_ffs(x)
+#define ctz(x)      __builtin_ctzl(x)
+#define ctz64(x)    __builtin_ctzl(x)
+#define ctz32(x)    __builtin_ctz(x)
+#define ctz16(x)    __builtin_ctzs(x)
+#define clz(x)      __builtin_clzl(x)
+#define clz64(x)    __builtin_clzl(x)
+#define clz32(x)    __builtin_clz(x)
+#define clz16(x)    __builtin_clzs(x)
+#define popcnt(x)   __builtin_popcountl(x)
+#define popcnt64(x) __builtin_popcountl(x)
+#define popcnt32(x) __builtin_popcount(x)
+#define popcnt16(x) __builtin_popcounts(x)
+#endif
 
 #define typeof(x) __typeof__(x)
 #define maxif(x) ((u64)0 - (bool)(x))
 #define cl_array_size(x) (sizeof(x)/sizeof(x[0]))
 
-
 #if _WIN32
 #define gcc_align(x)
 #define msvc_align(x) __declspec(align(x))
 #else
-#define gcc_align(x) __attribute__((aligned(x))
+#define gcc_align(x) __attribute__((aligned(x)))
 #define msvc_align(x)
 #endif
 
@@ -84,15 +108,15 @@ typedef void (*voidpfn)(void);
 
 #define swap(a, b) \
 do { \
-typeof(a) m__swap_tmp = a; \
-a = b; \
-b = m__swap_tmp; \
-} while(0);
+    typeof(a) m__swap_tmp = a; \
+        a = b; \
+        b = m__swap_tmp; \
+    } while(0);
 
 #define for_bits(pos, count, mask) \
-for(count = 0, pos = (typeof(pos))ctz(mask); \
-count < popcnt(mask); \
-pos = (typeof(pos))ctz((u64)mask & (Max_u64 << (pos + 1))), ++count)
+    for(count = 0, pos = (typeof(pos))ctz(mask); \
+        count < popcnt(mask); \
+        pos = (typeof(pos))ctz((u64)mask & (Max_u64 << (pos + 1))), ++count)
 
 static inline u64 trunc_copy(void *to, u64 to_sz, void *from, u64 from_sz)
 {
@@ -115,23 +139,26 @@ enum type {
 };
 
 // preproc.h
-#define paste(...) __VA_ARGS__
-#define stringify(...) #__VA_ARGS__
+#define glue_(a, b) a##b
+#define glue(a, b) glue_(a, b)
+#define paste_(...) __VA_ARGS__
+#define paste(...) paste_(__VA_ARGS__)
+#define stringify_(...) #__VA_ARGS__
+#define stringify(...) stringify_(__VA_ARGS__)
+
+#define typecheck(a, b) \
+    do { \
+        typeof(a) m__typecheck = b; \
+        m__typecheck = m__typecheck; \
+    while(0)
 
 #define def_wrapper_fn(wrapper_name, wrapped_name, ret_type, wrapper_args, wrapped_args) \
-static inline ret_type wrapper_name(wrapper_args) { return (ret_type)wrapped_name(wrapped_args); }
+    static inline ret_type wrapper_name(wrapper_args) { return (ret_type)wrapped_name(wrapped_args); }
 
 // os.h
-extern struct os {
-    bool is_valid;
-    u32 page_size;
-    u32 thread_count;
-    HANDLE stdout_handle;
-} os;
 
-struct os_process {
-    void *p,*t; // process and thread handle
-};
+// NOTE(SollyCB) os_fd will be 4 bytes larger on Windows which will mess with alignment,
+// but this
 
 #if _WIN32
 #define os_fd HANDLE
@@ -140,6 +167,19 @@ struct os_process {
 #define os_fd int
 #define OS_INVALID_FD -1
 #endif
+
+extern struct os {
+    bool is_valid;
+    u32 page_size;
+    u32 thread_count;
+    os_fd stdin_handle;
+    os_fd stdout_handle;
+    os_fd stderr_handle;
+} os;
+
+struct os_process {
+    os_fd p,t; // process and thread handle
+};
 
 #define def_create_os(name) void name(void)
 def_create_os(create_os);
@@ -156,7 +196,7 @@ def_os_deallocate(os_deallocate);
 #define def_os_page_size(name) u32 name(void)
 def_os_page_size(os_page_size);
 
-#define def_os_stdout(name) HANDLE name(void)
+#define def_os_stdout(name) os_fd name(void)
 def_os_stdout(os_stdout);
 
 #define def_os_create_lib(name) void* name(char *uri)
@@ -194,7 +234,6 @@ static inline void rc_init(rc_t *rc)
 
 static inline void rc_inc(rc_t *rc)
 {
-    
     rc->count += 1;
 }
 
@@ -245,79 +284,85 @@ enum {
     FTIM_MOD,
 };
 #define def_cmpftim(name) int name(u32 opt, char *x, char *y)
-def_cmpftim(cmpftim);
+    def_cmpftim(cmpftim);
 
 // print.h
 #define def_snprintf(name) u32 name(char *buf, u32 size, const char *fmt, ...)
-def_snprintf(scb_snprintf);
+    def_snprintf(scb_snprintf);
 
 #define print(fmt, ...) \
-do { \
-char m__print_buf[2046]; \
-u32 m__print_size = scb_snprintf(m__print_buf, sizeof(m__print_buf), fmt, __VA_ARGS__); \
-write_stdout(m__print_buf, m__print_size); \
-} while(0);
+    do { \
+        char m__print_buf[2046]; \
+        u32 m__print_size = scb_snprintf(m__print_buf, sizeof(m__print_buf), fmt, ##__VA_ARGS__); \
+        write_stdout(m__print_buf, m__print_size); \
+    } while(0);
 
 #define println(fmt, ...) \
-do { \
-char m__println_buf[2046]; \
-u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, __VA_ARGS__); \
-m__println_buf[m__println_size++] = '\n'; \
-write_stdout(m__println_buf, m__println_size); \
-} while(0);
+    do { \
+        char m__println_buf[2046]; \
+        u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, ##__VA_ARGS__); \
+        m__println_buf[m__println_size++] = '\n'; \
+        write_stdout(m__println_buf, m__println_size); \
+    } while(0);
 
 #define print_err(fmt, ...) \
-do { \
-char m__print_buf[2046]; \
-u32 m__print_size = scb_snprintf(m__print_buf, sizeof(m__print_buf), fmt, __VA_ARGS__); \
-write_stderr(m__print_buf, m__print_size); \
-} while(0);
+    do { \
+        char m__print_buf[2046]; \
+        u32 m__print_size = scb_snprintf(m__print_buf, sizeof(m__print_buf), fmt, ##__VA_ARGS__); \
+        write_stderr(m__print_buf, m__print_size); \
+    } while(0);
 
 #define println_err(fmt, ...) \
 do { \
-char m__println_buf[2046]; \
-u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, __VA_ARGS__); \
-m__println_buf[m__println_size++] = '\n'; \
-write_stderr(m__println_buf, m__println_size); \
+    char m__println_buf[2046]; \
+    u32 m__println_size = scb_snprintf(m__println_buf, sizeof(m__println_buf), fmt, ##__VA_ARGS__); \
+    m__println_buf[m__println_size++] = '\n'; \
+    write_stderr(m__println_buf, m__println_size); \
 } while(0);
 
 // assert.h
 #define scb_assert(x) \
-if (!(x)) { \
-println("[%s, %s, %u] ASSERT : %s", __FILE__, __FUNCTION__, __LINE__, #x); \
-__debugbreak(); \
-}
-
+    if (!(x)) { \
+        println("[%s, %s, %u] ASSERT : %s", __FILE__, __FUNCTION__, __LINE__, #x); \
+        scb_debugbreak(); \
+    }
 
 #if DEBUG
-#define log_break __debugbreak()
+
+#ifdef _WIN32
+#define scb_debugbreak() __debugbreak()
+#else
+#define scb_debugbreak() __builtin_trap()
+#endif
+
+#define log_break scb_debugbreak()
 
 #define log_error(...) \
-do { \
-print("[%s, %s, %u] LOG ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
-println(__VA_ARGS__); \
-log_break; \
-} while(0);
+    do { \
+        print("[%s, %s, %u] LOG ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
+        println(__VA_ARGS__); \
+        log_break; \
+    } while(0);
 
 #define log_os_error(...) \
-do { \
-char m__log_os_error_buf[512]; \
-os_error_string(m__log_os_error_buf, sizeof(m__log_os_error_buf)); \
-print("[%s, %s, %u] LOG OS ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
-print(__VA_ARGS__); \
-println(" : %s", m__log_os_error_buf); \
-log_break; \
-} while(0);
+    do { \
+        char m__log_os_error_buf[512]; \
+        os_error_string(m__log_os_error_buf, sizeof(m__log_os_error_buf)); \
+        print("[%s, %s, %u] LOG OS ERROR : ", __FILE__, __FUNCTION__, __LINE__); \
+        print(__VA_ARGS__); \
+        println(" : %s", m__log_os_error_buf); \
+        log_break; \
+    } while(0);
 #else
 #define log_error(...)
 #define log_os_error(...)
 #endif
 
 #define log_error_if(prec, ...) \
-do { if (prec) log_error(__VA_ARGS__); } while(0);
+    do { if (prec) log_error(__VA_ARGS__); } while(0);
 
 #define log_os_error_if(prec, ...) \
-do { if (prec) log_os_error(__VA_ARGS__); } while(0);
+    do { if (prec) log_os_error(__VA_ARGS__); } while(0);
 
 #define invalid_default_case log_error("Invalid default case")
 
@@ -373,12 +418,12 @@ struct rect_f32 {
 #define OFFSET_OP(p1, p2, op, type) OFFSET(p1.x op p2.x, p1.y op p2.y, type)
 
 #define rect_clamp(rect, lim) \
-do { \
-if (rect.ofs.x < lim.ofs.x) rect.ofs.x = lim.ofs.x; \
-if (rect.ofs.y < lim.ofs.y) rect.ofs.y = lim.ofs.y; \
-if (rect.ext.w > lim.ext.w) rect.ext.w = lim.ext.w; \
-if (rect.ext.h > lim.ext.h) rect.ext.h = lim.ext.h; \
-} while(0)
+    do { \
+        if (rect.ofs.x < lim.ofs.x) rect.ofs.x = lim.ofs.x; \
+        if (rect.ofs.y < lim.ofs.y) rect.ofs.y = lim.ofs.y; \
+        if (rect.ext.w > lim.ext.w) rect.ext.w = lim.ext.w; \
+        if (rect.ext.h > lim.ext.h) rect.ext.h = lim.ext.h; \
+    } while(0)
 
 struct rgba { u8 r,g,b,a; };
 #define RGBA(red,green,blue,alpha) ((struct rgba) {.r = red, .g = green, .b = blue, .a = alpha})
@@ -455,10 +500,10 @@ static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u3
         ret[0] = pos_1;
         return 1;
     }
-    
+
     if (pos_1.y > pos_2.y)
         swap(pos_1, pos_2);
-    
+
     if (pos_1.x == pos_2.x) {
         struct rect_u32 rect = RECT(OFFSET(pos_1.x, pos_1.y, u32), EXTENT(width, pos_2.y - pos_1.y, u32), u32);
         return fill_rect_simple(rect, ret);
@@ -468,12 +513,12 @@ static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u3
         struct rect_u32 rect = RECT(OFFSET(x1, pos_1.y, u32), EXTENT(x2-x1, width, u32), u32);
         return fill_rect_simple(rect, ret);
     }
-    
+
     struct offset_s32 vec = OFFSET(pos_2.x - pos_1.x, pos_2.y - pos_1.y, s32);
     float f = (f32)(width * width) / (vec.x*vec.x + vec.y*vec.y);
     s32 sh_x = (s32)(vec.y * f);
     s32 sh_y = (s32)(vec.x * f);
-    
+
     struct offset_u32 p1,p2,p3,p4;
     if (vec.x < 0) { // sh_y will be negative
         p1 = OFFSET(pos_1.x - sh_x, pos_1.y + sh_y, u32);
@@ -486,26 +531,26 @@ static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u3
         p3 = OFFSET(pos_1.x - sh_x, pos_1.y + sh_y, u32);
         p4 = OFFSET(pos_2.x - sh_x, pos_2.y + sh_y, u32);
     }
-    
+
     if ((vec.x < 0 && p2.y > p3.y) ||
         (vec.x > 0 && p2.y < p3.y))
     {
         swap(p2, p3);
     }
-    
+
     u32 h_top = vec.x < 0 ? p2.y - p1.y : p3.y - p1.y;
     u32 h_mid = vec.x < 0 ? p3.y - p2.y : p2.y - p3.y;
     u32 h_bot = vec.x < 0 ? p4.y - p3.y : p4.y - p2.y;
-    
+
     u32 cnt = 0;
     {
         f32 d12 = ((f32)p2.x - p1.x) / (p2.y - p1.y);
         f32 d13 = ((f32)p3.x - p1.x) / (p3.y - p1.y);
-        
+
         u32 h = h_top;
         f32 xbeg = d13;
         f32 xend = d12;
-        
+
         for(u32 y = 0; y < h; ++y, xbeg += d13, xend += d12) {
             for(s32 x = (s32)xbeg; x < (s32)xend; ++x)
                 ret[cnt++] = OFFSET((u32)(x + p1.x), y + p1.y, u32);
@@ -513,10 +558,10 @@ static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u3
     } {
         f32 d = vec.x < 0 ? ((f32)p3.x - p1.x) / (p3.y - p1.y) : ((f32)p2.x - p1.x) / (p2.y - p1.y);
         u32 h = h_mid;
-        
+
         f32 xbeg = d;
         f32 xend = d;
-        
+
         for(u32 y = h_top; y < h + h_top; ++y, xbeg += d, xend += d) {
             for(s32 x = (s32)xbeg; x < (s32)xend; ++x)
                 ret[cnt++] = OFFSET((u32)(x + p1.x), y + p1.y, u32);
@@ -524,11 +569,11 @@ static inline u32 fill_rect(struct offset_u32 pos_1, struct offset_u32 pos_2, u3
     } {
         f32 d24 = ((f32)p4.x - p2.x) / (p4.y - p2.y);
         f32 d34 = ((f32)p4.x - p3.x) / (p4.y - p3.y);
-        
+
         u32 h = h_bot;
         f32 xbeg = d34;
         f32 xend = d24;
-        
+
         for(u32 y = h_mid + h_top; y < h + h_mid + h_top; ++y, xbeg += d34, xend += d24) {
             for(s32 x = (s32)xbeg; x < (s32)xend; ++x)
                 ret[cnt++] = OFFSET((u32)(x + p1.x), y + p1.y, u32);
@@ -850,27 +895,27 @@ static inline vector hamilton_product(vector q1, vector q2)
         .w = q1.w * q2.w - q1.x * q2.x - q1.y * q2.y - q1.z * q2.z,
     };
 #endif
-    
+
     __m128 a,b,c,d,e;
-    
+
     a = _mm_load_ps(&q2.x);
-    
+
     b = _mm_set_ps1(q1.w);
     c = _mm_set_ps1(q1.x);
     d = _mm_set_ps1(q1.y);
     e = _mm_set_ps1(q1.z);
-    
+
     b = _mm_mul_ps(a,b);
     c = _mm_mul_ps(a,c);
     d = _mm_mul_ps(a,d);
     e = _mm_mul_ps(a,e);
-    
+
     vector x,y,z,w;
     _mm_store_ps(&w.x, b);
     _mm_store_ps(&x.x, c);
     _mm_store_ps(&y.x, d);
     _mm_store_ps(&z.x, e);
-    
+
     return (vector) { // @Optimise This could likely be done better, idk.
         .x = w.x + x.w + y.z - z.y,
         .y = w.y - x.z + y.w + z.x,
@@ -1008,28 +1053,28 @@ static inline void rotation_matrix(vector r, matrix *m)
     __m128 b = a;
     a = _mm_mul_ps(a,b);
     float *f = (float*)&a;
-    
+
     float xy = 2 * r.x * r.y;
     float xz = 2 * r.x * r.z;
     float yz = 2 * r.y * r.z;
     float wx = 2 * r.w * r.x;
     float wy = 2 * r.w * r.y;
     float wz = 2 * r.w * r.z;
-    
+
     identity_matrix(m);
-    
+
     m->m[0] = f[3] + f[0] - f[1] - f[2];
     m->m[4] = xy - wz;
     m->m[8] = xz + wy;
-    
+
     m->m[1] = xy + wz;
     m->m[5] = f[3] - f[0] + f[1] - f[2];
     m->m[9] = yz - wx;
-    
+
     m->m[2] = xz - wy;
     m->m[6] = yz + wx;
     m->m[10] = f[3] - f[0] - f[1] + f[2];
-    
+
     m->m[15] = 1;
 }
 
@@ -1085,31 +1130,31 @@ static inline vector mul_matrix_vector(matrix *m, vector p)
     __m128 a;
     __m128 b;
     __m128 c;
-    
+
     a = _mm_load_ps(m->m + 0);
     b = _mm_set1_ps(p.x);
     c = _mm_mul_ps(a, b);
-    
+
     a = _mm_load_ps(m->m + 4);
     b = _mm_set1_ps(p.y);
     a = _mm_mul_ps(a, b);
     c = _mm_add_ps(a, c);
-    
+
     a = _mm_load_ps(m->m + 8);
     b = _mm_set1_ps(p.z);
     a = _mm_mul_ps(a, b);
     c = _mm_add_ps(a, c);
-    
+
     a = _mm_load_ps(m->m + 12);
     b = _mm_set1_ps(p.w);
     a = _mm_mul_ps(a, b);
     c = _mm_add_ps(a, c);
-    
+
     // float *f = (float*)&c;
     // return get_vector(f[0], f[1], f[2], f[3]);
     vector v;
     _mm_store_ps(&v.x, c);
-    
+
     return v;
 }
 
@@ -1130,17 +1175,17 @@ static inline bool invert(matrix *x, matrix *y)
 {
     float msvc_align(16) m[3][8] gcc_align(16);
     memset(m, 0, sizeof(m));
-    
+
     m[0][0] = x->m[0]; m[1][0] = x->m[4]; m[2][0] = x->m[ 8];
     m[0][1] = x->m[1]; m[1][1] = x->m[5]; m[2][1] = x->m[ 9];
     m[0][2] = x->m[2]; m[1][2] = x->m[6]; m[2][2] = x->m[10];
-    
+
     m[0][3] = 1; m[0][4] = 0; m[0][5] = 0;
     m[1][3] = 0; m[1][4] = 1; m[1][5] = 0;
     m[2][3] = 0; m[2][4] = 0; m[2][5] = 1;
-    
+
     __m128 a,b,c,d,e,f,g;
-    
+
     for(u32 j=0; j < 3; ++j) {
         float max = 0;
         u32 r = Max_u32;
@@ -1149,13 +1194,13 @@ static inline bool invert(matrix *x, matrix *y)
             max = fabsf(m[row][j]);
             r = row;
         }
-        
+
         if (feq(max, 0))
             return false;
-        
+
         a = _mm_load_ps(m[j] + 0);
         b = _mm_load_ps(m[j] + 4);
-        
+
         if (r != j) {
             c = _mm_load_ps(m[r] + 0);
             d = _mm_load_ps(m[r] + 4);
@@ -1168,17 +1213,17 @@ static inline bool invert(matrix *x, matrix *y)
             a = c;
             b = d;
         }
-        
+
         e = _mm_set1_ps(1 / m[j][j]);
         a = _mm_mul_ps(a, e);
         b = _mm_mul_ps(b, e);
         _mm_store_ps(m[j] + 0, a);
         _mm_store_ps(m[j] + 4, b);
-        
+
         for(r=0; r < 3; ++r) {
             if (r == j)
                 continue;
-            
+
             e = _mm_set1_ps(-m[r][j]);
             f = _mm_mul_ps(e, a);
             g = _mm_mul_ps(e, b);
@@ -1190,11 +1235,11 @@ static inline bool invert(matrix *x, matrix *y)
             _mm_store_ps(m[r] + 4, d);
         }
     }
-    
+
     matrix3(vector3(m[0][3], m[0][4], m[0][5]),
             vector3(m[1][3], m[1][4], m[1][5]),
             vector3(m[2][3], m[2][4], m[2][5]), y);
-    
+
     return true;
 }
 
@@ -1215,17 +1260,17 @@ static inline void view_matrix(vector pos, vector dir, vector up, matrix *m)
     vector d = normalize(dir);
     vector r = normalize(cross(d, w));
     vector u = normalize(cross(r, d));
-    
+
     matrix rot;
     matrix3(vector3(r.x, u.x, -d.x),
             vector3(r.y, u.y, -d.y),
             vector3(r.z, u.z, -d.z), &rot);
-    
+
     rot.m[15] = 1;
-    
+
     matrix trn;
     translation_matrix(scale_vector(pos, -1), &trn);
-    
+
     mul_matrix(&rot, &trn, m);
 }
 
@@ -1235,17 +1280,17 @@ static inline void move_to_camera(vector pos, vector dir, vector up, matrix *m)
     vector d = normalize(dir);
     vector r = normalize(cross(d, w));
     vector u = normalize(cross(r, d));
-    
+
     matrix rot;
     matrix3(vector3( r.x,  r.y,  r.z),
             vector3( u.x,  u.y,  u.z),
             vector3(-d.x, -d.y, -d.z), &rot);
-    
+
     rot.m[15] = 1;
-    
+
     matrix trn;
     translation_matrix(pos, &trn);
-    
+
     mul_matrix(&trn, &rot, m);
 }
 
@@ -1258,12 +1303,12 @@ static inline float focal_length(float fov)
 static inline void perspective_matrix(float fov, float a, float n, float f, matrix *m)
 {
     float e = focal_length(fov);
-    
+
     float l = -n / e;
     float r = n / e;
     float t = (a * n) / e;
     float b = -(a * n) / e;
-    
+
     memset(m, 0, sizeof(*m));
     m->m[0] = (2 * n) / (r - l);
     m->m[5] = -(2 * n) / (t - b); // negate because Vulkan
@@ -1290,11 +1335,11 @@ static inline float dist_point_line(vector p, vector s, vector v)
     float q = sq_vector(sub_vector(p, s));
     float r = powf(dot(sub_vector(p, s), v), 2.0f);
     float d = powf(magnitude_vector(v), 2.0f);
-    
+
     // the sqrtf will nan if this is true because float error gives a negative
     if (feq(q - r / d, 0.0f))
         return 0.0f;
-    
+
     return sqrtf(q - r / d);
 }
 
@@ -1315,14 +1360,14 @@ static inline int intersect_line_plane(vector p, vector s, vector v, vector *ret
                 return PARALLEL;
         }
     }
-    
+
     s.w = 1;
     v.w = 0;
     float t = -dot(p, s) / dot(p, v);
-    
+
     s.w = 0;
     *ret = add_vector(s, scale_vector(v, t));
-    
+
     return INTERSECT;
 }
 
@@ -1331,12 +1376,12 @@ static inline vector intersect_three_planes(vector l1, vector l2, vector l3)
 {
     matrix m;
     matrix3(vector3(l1.x, l2.x, l3.x), vector3(l1.y, l2.y, l3.y), vector3(l1.z, l2.z, l3.z), &m);
-    
+
     if (!invert(&m, &m)) {
         print_matrix(&m);
         log_error("matrix is not invertible");
     }
-    
+
     vector d = vector3(-l1.w, -l2.w, -l3.w);
     return mul_matrix_vector(&m, d);
 }
@@ -1347,21 +1392,21 @@ static inline vector intersect_two_planes_point(vector l1, vector l2, vector q1,
     matrix m;
     vector v,q,d;
     float d1,d2;
-    
+
     d1 = dot(vector3(-l1.x, -l1.y, -l1.z), vector3(q1.x, q1.y, q1.z));
     d2 = dot(vector3(-l2.x, -l2.y, -l2.z), vector3(q2.x, q2.y, q2.z));
-    
+
     v = cross(l1, l2);
     d = vector3(-d1, -d2, 0);
     matrix3(vector3(l1.x, l2.x, v.x), vector3(l1.y, l2.y, v.y), vector3(l1.z, l2.z, v.z), &m);
-    
+
     if (!invert(&m, &m)) {
         print_matrix(&m);
         log_error("matrix is not invertible");
     }
-    
+
     q = mul_matrix_vector(&m, d);
-    
+
     return add_vector(q, scale_vector(v, -dot(v, q) / dot(v, v)));
 }
 
@@ -1428,12 +1473,12 @@ static inline bool list_remove(list_t *list)
 {
     if (list->next == list->prev)
         return false;
-    
+
     list_t *next = list->next;
     list_t *prev = list->prev;
     next->prev = prev;
     prev->next = next;
-    
+
     return true;
 }
 
@@ -1613,7 +1658,6 @@ static inline def_reset_allocator(reset_allocator, allocator)
         case TYPE_ARENA: return reset_arena_allocator(&alloc->arena);
         default: invalid_default_case;
     }
-    return NULL;
 }
 
 static inline def_deallocate(deallocate, allocator)
@@ -1656,12 +1700,12 @@ typedef struct string_buffer {
 typedef struct string_array {
     u32 size;
     u32 used;
-    
+
     struct {
         u64 offset;
         u64 size;
     } *ranges;
-    
+
     string_buffer_t buf;
     allocator_t *alloc;
 } string_array_t;
@@ -1865,12 +1909,12 @@ typedef struct dict_iter dict_iter_t;
 #define typed_dict_destroy_args(dict_type) dict_type *dict
 #define typed_dict_destroy_ret() void
 
-#define def_create_dict(name) int name(u64 size, u64 stride, allocator_t *alloc, dict_t *dict)
-#define def_dict_insert(name) int dict_insert(dict_t *dict, struct string key, void *val, u64 stride)
-#define def_dict_find(name) bool dict_find(dict_t *dict, struct string key, u64 stride, void *ret)
+#define def_create_dict(name) int create_dict(u64 size, allocator_t *alloc, dict_t *dict, u64 stride)
+#define def_dict_insert(name) int dict_insert(dict_t *dict, struct string key, void *val, u64 stride, u64 size)
+#define def_dict_find(name) bool dict_find(dict_t *dict, struct string key, void *ret, u64 stride, u64 size)
 #define def_dict_remove(name) bool dict_remove(dict_t *dict, struct string key, u64 stride)
 #define def_dict_get_iter(name) void dict_get_iter(dict_t *dict, dict_iter_t *iter)
-#define def_dict_iter_next(name) bool dict_iter_next(dict_iter_t *iter, u64 stride, void *ret)
+#define def_dict_iter_next(name) bool dict_iter_next(dict_iter_t *iter, void *ret, u64 stride)
 #define def_destroy_dict(name) void destroy_dict(dict_t *dict, u64 stride)
 
 def_create_dict(create_dict);
@@ -1889,42 +1933,43 @@ def_get_dict_key(get_dict_key);
 while(func(dict_iter, kv))
 
 #define def_dict_kv(name, type) \
-struct name { \
-u64 key; \
-type val; \
-};
+    struct name { \
+        u64 key; \
+        type val; \
+    };
 
 #define def_dict(name, kv_name) \
-typedef struct name { \
-u32 cap; \
-u32 rem; \
-kv_name *data; \
-allocator_t *alloc; \
-} name ## _t;
+    typedef struct name { \
+        u32 cap; \
+        u32 rem; \
+        kv_name *data; \
+        allocator_t *alloc; \
+    } name ## _t;
 
 #define def_dict_iter(name, dict_name) \
-typedef struct name { \
-dict_name *dict; \
-u32 pos; \
-} name ## _t;
+    typedef struct name { \
+        dict_name *dict; \
+        u32 pos; \
+    } name ## _t;
 
 #define def_typed_dict(abbrev, value) \
-def_dict_kv(abbrev ## _dict_kv, typeof(value)) \
-def_dict(abbrev ## _dict, struct abbrev ## _dict_kv) \
-def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t) \
-def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, sizeof(*dict->data), alloc, (dict_t*)dict)) \
-def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data))) \
-def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(), typed_dict_find_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, sizeof(*dict->data), ret)) \
-def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(), typed_dict_remove_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
-def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(), typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t), paste((dict_t*)dict, (dict_iter_t*)iter)) \
-def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(), typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)), paste((dict_iter_t*)iter, sizeof(*iter->dict->data), ret)) \
-def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(), typed_dict_destroy_args(abbrev ## _dict_t), paste((dict_t*)dict, sizeof(*dict->data)))
+    def_dict_kv(abbrev ## _dict_kv, typeof(value)) \
+    def_dict(abbrev ## _dict, struct abbrev ## _dict_kv) \
+    def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t) \
+    def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, alloc, (dict_t*)dict), sizeof(*dict->data)) \
+    def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data), sizeof(*dict->data->val))) \
+    def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(), typed_dict_find_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, ret), sizeof(*dict->data), sizeof(*dict->data->val)) \
+    def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(), typed_dict_remove_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
+    def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(), typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t), paste((dict_t*)dict, (dict_iter_t*)iter)) \
+    def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(), typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)), paste((dict_iter_t*)iter, ret, sizeof(*iter->dict->data))) \
+    def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(), typed_dict_destroy_args(abbrev ## _dict_t), paste((dict_t*)dict, sizeof(*dict->data)))
 
 #ifdef SOL_DEF
 
 // os.c
 struct os os;
 
+#ifdef _WIN32
 def_create_os(create_os)
 {
     assert(os.is_valid == false);
@@ -1986,12 +2031,12 @@ def_os_create_process(os_create_process)
 {
     STARTUPINFO si = {sizeof(si)};
     PROCESS_INFORMATION pi = {};
-    
+
     if (!CreateProcess(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         log_os_error("Failed to create process with command %s", cmdline);
         return -1;
     }
-    
+
     p->p = pi.hProcess;
     p->t = pi.hThread;
     return 0;
@@ -2000,13 +2045,13 @@ def_os_create_process(os_create_process)
 def_os_await_process(os_await_process)
 {
     WaitForSingleObject(p->p, INFINITE);
-    
+
     int res;
     if (!GetExitCodeProcess(p->p, (LPDWORD)&res)) {
         log_error("Failed to get process exit code");
         return Max_s32;
     }
-    
+
     return res;
 }
 
@@ -2020,6 +2065,80 @@ def_os_sleep_ms(os_sleep_ms)
 {
     Sleep(ms);
 }
+#else
+def_create_os(create_os)
+{
+    assert(os.is_valid == false);
+    os.page_size = getpagesize();
+    os.stdin_handle = 0;
+    os.stdout_handle = 1;
+    os.stderr_handle = 2;
+    os.thread_count = get_nprocs();
+}
+
+def_os_error_string(os_error_string)
+{
+    switch(strerror_r(errno, buf, size)) {
+        case EINVAL:
+            log_error("EINVAL - errno is invalid");
+            break;
+        case ERANGE:
+            log_error("ERANGE - supplied buffer is too small");
+            break;
+        default:
+            break;
+    }
+}
+
+def_os_allocate(os_allocate)
+{
+    log_error_if(p == NULL, "Failed to allocate %u bytes from OS", size);
+}
+
+def_os_deallocate(os_deallocate)
+{
+    log_os_error_if(b == false, "Failed to free address %u", p);
+}
+
+def_os_page_size(os_page_size)
+{
+}
+
+def_os_stdout(os_stdout)
+{
+    if (!os.is_valid)
+        create_os();
+    return os.stdout_handle;
+}
+
+def_os_create_lib(os_create_lib)
+{
+}
+
+def_os_libproc(os_libproc)
+{
+}
+
+def_os_destroy_lib(os_destroy_lib)
+{
+}
+
+def_os_create_process(os_create_process)
+{
+}
+
+def_os_await_process(os_await_process)
+{
+}
+
+def_os_destroy_process(os_destroy_process)
+{
+}
+
+def_os_sleep_ms(os_sleep_ms)
+{
+}
+#endif
 
 // file.c
 enum {
@@ -2028,6 +2147,7 @@ enum {
     FILE_CREATE = 0x02,
 };
 
+#ifdef _WIN32
 def_write_stdout(write_stdout)
 {
     WriteFile(os_stdout(), buf, (u32)size, NULL, NULL);
@@ -2042,14 +2162,14 @@ def_write_file(write_file)
         log_os_error("Failed to open file %s", uri);
         return FILE_ERROR;
     }
-    
+
     BOOL success = WriteFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
         log_os_error("Failed to write file %s", uri);
         CloseHandle(fd);
         return FILE_ERROR;
     }
-    
+
     CloseHandle(fd);
     return res;
 }
@@ -2059,32 +2179,32 @@ def_read_file(read_file)
     if (!buf) {
         WIN32_FIND_DATA info;
         HANDLE fd = FindFirstFile(uri, &info);
-        
+
         if (fd == INVALID_HANDLE_VALUE) {
             log_os_error("Failed to find file %s", uri);
             return FILE_ERROR;
         }
-        
+
         FindClose(fd);
         return info.nFileSizeLow;
     }
-    
+
     u32 res = 0;
     HANDLE fd = CreateFile(uri, GENERIC_READ, 0, NULL, OPEN_EXISTING,
                            FILE_ATTRIBUTE_NORMAL, NULL);
-    
+
     if (fd == INVALID_HANDLE_VALUE) {
         log_os_error("Failed to open file %s", uri);
         return FILE_ERROR;
     }
-    
+
     BOOL success = ReadFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
         log_os_error("Failed to read file %s", uri);
         CloseHandle(fd);
         return FILE_ERROR;
     }
-    
+
     CloseHandle(fd);
     return res;
 }
@@ -2102,12 +2222,12 @@ def_create_fd(create_fd)
         fd = CreateFile(uri, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
                         FILE_ATTRIBUTE_NORMAL, NULL);
     }
-    
+
     if (fd == INVALID_HANDLE_VALUE) {
         log_os_error("Failed to get file handle");
         return OS_INVALID_FD;
     }
-    
+
     return fd;
 }
 
@@ -2137,14 +2257,14 @@ def_read_fd(read_fd)
         }
         return sz;
     }
-    
+
     u32 res;
     BOOL success = ReadFile(fd, buf, (u32)size, (LPDWORD)&res, NULL);
     if (!success) {
         log_os_error("Failed to read fd");
         return FILE_ERROR;
     }
-    
+
     return res;
 }
 
@@ -2160,24 +2280,24 @@ def_copy_file(copy_file)
 def_trunc_file(trunc_file)
 {
     int res = 0;
-    
+
     HANDLE h = CreateFile(uri, GENERIC_READ|GENERIC_WRITE,
                           0, NULL, CREATE_ALWAYS, 0, NULL);
-    
+
     if (h == INVALID_HANDLE_VALUE) {
         log_error("Failed to open file for truncation (%s)", uri);
         res = -1;
         goto out;
     }
-    
+
     FILE_END_OF_FILE_INFO fi = {.EndOfFile = (DWORD)sz};
-    
+
     if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &fi, sizeof(fi))) {
         log_error("Failed to truncate file %s to size %u", uri, sz);
         res = -1;
         goto out;
     }
-    
+
     out:
     CloseHandle(h);
     return res;
@@ -2190,7 +2310,7 @@ def_getftim(getftim)
         log_error("Failed to stat file %s", uri);
         return Max_u64;
     }
-    
+
     ULARGE_INTEGER li; // Fuck this api...
     li.LowPart = d.ftLastWriteTime.dwLowDateTime;
     li.HighPart = d.ftLastWriteTime.dwHighDateTime;
@@ -2201,12 +2321,12 @@ def_cmpftim(cmpftim)
 {
     u64 tx = getftim(x);
     u64 ty = getftim(y);
-    
+
     if (tx == Max_u64 || ty == Max_u64) {
         log_error("Failed to get file times for comparison");
         return Max_s32;
     }
-    
+
     switch(opt) {
         case FTIM_MOD: {
             if (tx < ty) return -1;
@@ -2218,6 +2338,69 @@ def_cmpftim(cmpftim)
     }
     return Max_s32;
 }
+#else
+def_write_stdout(write_stdout)
+{
+}
+
+def_write_file(write_file)
+{
+}
+
+def_read_file(read_file)
+{
+}
+
+def_create_fd(create_fd)
+{
+}
+
+def_destroy_fd(destroy_fd)
+{
+}
+
+def_write_fd(write_fd)
+{
+}
+
+def_read_fd(read_fd)
+{
+}
+
+def_copy_file(copy_file)
+{
+}
+
+def_trunc_file(trunc_file)
+{
+}
+
+def_getftim(getftim)
+{
+}
+
+def_cmpftim(cmpftim)
+{
+    u64 tx = getftim(x);
+    u64 ty = getftim(y);
+
+    if (tx == Max_u64 || ty == Max_u64) {
+        log_error("Failed to get file times for comparison");
+        return Max_s32;
+    }
+
+    switch(opt) {
+        case FTIM_MOD: {
+            if (tx < ty) return -1;
+            if (tx > ty) return 1;
+            return 0;
+        } break;
+        default:
+        invalid_default_case;
+    }
+    return Max_s32;
+}
+#endif
 
 // print.c
 enum {
@@ -2238,10 +2421,10 @@ def_pr_parse(pr_parse_u, u64)
     u32 bp = 0;
     u32 zc = 0;
     char tmp[128];
-    
+
     if (x == 0)
         tmp[bp++] = '0';
-    
+
     if (f & PR_Z) {
         zc = clz64(x) & maxif(popcnt(x));
         if (f & PR_H)
@@ -2441,18 +2624,18 @@ static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
     u64 block_size = align(size + ARENA_HEADER_SIZE, os_page_size());
     if (block_size < alloc->min_block_size)
         block_size = alloc->min_block_size;
-    
+
     void *p = os_allocate(block_size);
     if (!p)
         return NULL;
-    
+
     struct arena_header *block = p;
     void *mem = block + 1;
-    
+
     memset(block, 0, sizeof(*block));
     block->validation_bits = ARENA_VALIDATION_BITS;
     create_linear(mem, block_size - ARENA_HEADER_SIZE, &block->linear);
-    
+
     alloc->block_count += 1;
     return block;
 }
@@ -2500,13 +2683,13 @@ static void arena_header_deallocate(arena_t *alloc, struct arena_header *block, 
 def_create_allocator(create_linear, linear)
 {
     size = alloc_align(size);
-    
+
     if (!buf) {
         buf = os_allocate(size);
         if (!buf)
             return -1;
     }
-    
+
     alloc->data = buf;
     alloc->size = size;
     alloc->used = 0;
@@ -2519,11 +2702,11 @@ def_allocate(linear_allocate, linear)
     size = alloc_align(size);
     if (alloc->size < alloc->used + size + sizeof(*info))
         return NULL;
-    
+
     info = (typeof(info))(alloc->data + alloc->used);
     info->guard = ALLOC_INFO_GUARD;
     info->size = size;
-    
+
     alloc->used += size + sizeof(*info);
     return alloc->data + alloc->used - size;
 }
@@ -2532,23 +2715,23 @@ def_reallocate(linear_reallocate, linear)
 {
     u64 old_size = alloc_check_guard_and_get_size(old_p);
     new_size = alloc_align(new_size);
-    
+
     if (linear_is_top(alloc, old_p, old_size)) {
         log_error_if(new_size < old_size && old_size - new_size > alloc->used, "Allocator underflow");
         log_error_if(new_size > old_size && new_size - old_size > alloc->size - alloc->used, "Allocator overflow");
-        
+
         alloc->used += (s64)new_size - (s64)old_size;
         alloc_info_new_size(old_p, new_size);
         return old_p;
     }
-    
+
     if (new_size < old_size)
         return old_p;
-    
+
     void *p = linear_allocate(alloc, new_size);
     if (p)
         memcpy(p, old_p, old_size);
-    
+
     return p;
 }
 
@@ -2593,20 +2776,20 @@ def_create_allocator(create_arena, arena)
 def_allocate(arena_allocate, arena)
 {
     size = alloc_align(size);
-    
+
     struct arena_header *block;
     u32 count = alloc->block_count;
-    
+
     list_for(block, &alloc->block_list, list, count) {
         void *p = arena_header_allocate(block, size);
         if (p)
             return p;
     }
-    
+
     block = create_arena_block(alloc, size);
     if (!block)
         return NULL;
-    
+
     list_add_tail(&alloc->block_list, &block->list);
     return arena_header_allocate(block, size);
 }
@@ -2614,16 +2797,16 @@ def_allocate(arena_allocate, arena)
 def_reallocate(arena_reallocate, arena)
 {
     u64 old_size = alloc_check_guard_and_get_size(old_p);
-    
+
     void *p;
     struct arena_header *block = arena_find_block(alloc, old_p);
-    
+
     if (linear_is_top(&block->linear, old_p, old_size)) {
         p = linear_reallocate(&block->linear, old_p, new_size);
         if (p)
             return p;
     }
-    
+
     p = arena_allocate(alloc, new_size);
     if (p) {
         memcpy(p, old_p, old_size);
@@ -2637,10 +2820,10 @@ def_allocator_size(arena_size, arena)
     u64 size = 0;
     u32 count = alloc->block_count;
     struct arena_header *block;
-    
+
     list_for(block, &alloc->block_list, list, count)
         size += align(linear_size(&block->linear) + ARENA_HEADER_SIZE, os_page_size());
-    
+
     return size;
 }
 
@@ -2649,10 +2832,10 @@ def_allocator_used(arena_used, arena)
     u64 size = 0;
     u32 count = alloc->block_count;
     struct arena_header *block;
-    
+
     list_for(block, &alloc->block_list, list, count)
         size += linear_used(&block->linear);
-    
+
     return size;
 }
 
@@ -2666,7 +2849,7 @@ def_reset_allocator(reset_arena_allocator, arena)
 {
     u32 count = alloc->block_count;
     struct arena_header *block;
-    
+
     list_for(block, &alloc->block_list, list, count)
         reset_linear_allocator(&block->linear);
 }
@@ -2693,39 +2876,39 @@ def_string_buffer_add(string_buffer_add)
     log_error_if(strbuf->size < strbuf->used, "string_buffer overflowed");
     if (strbuf->size <= strbuf->used)
         return -1;
-    
+
     int res = 0;
     if (strbuf->size < strbuf->used + str.size + 1) {
         res = -1;
         str.size = strbuf->size - strbuf->used - 1;
     }
-    
+
     ret->data = strbuf->data + strbuf->used;
     ret->size = str.size;
     strbuf->used += str.size + 1;
-    
+
     memcpy(ret->data, str.data, ret->size);
     ret->data[ret->size] = 0;
-    
+
     return res;
 }
 
 def_string_buffer_add_all(string_buffer_add_all)
 {
     log_error_if(strbuf->size < strbuf->used, "string_buffer overflowed");
-    
+
     if (strbuf->size < strbuf->used + str.size + 1) {
         memset(ret, 0, sizeof(*ret));
         return -1;
     }
-    
+
     ret->data = strbuf->data + strbuf->used;
     ret->size = str.size;
     strbuf->used += str.size + 1;
-    
+
     memcpy(ret->data, str.data, ret->size);
     ret->data[ret->size] = 0;
-    
+
     return 0;
 }
 
@@ -2736,19 +2919,19 @@ def_create_string_array(create_string_array)
         log_error("Failed to allocate memory for buffer");
         return -1;
     }
-    
+
     ret->ranges = allocate(alloc, sizeof(*ret->ranges) * arr_size);
     if (!ret->ranges) {
         log_error("Failed to allocate memory for ranges array");
         deallocate(alloc, buf);
         return -1;
     }
-    
+
     ret->size = arr_size;
     ret->used = 0;
     ret->alloc = alloc;
     get_string_buffer(buf, buf_size, &ret->buf);
-    
+
     return 0;
 }
 
@@ -2758,16 +2941,16 @@ def_string_array_add(string_array_add)
     if (strarr->size == strarr->used) {
         u64 size = sizeof(*strarr->ranges) * strarr->size;
         void *ranges = reallocate(strarr->alloc, strarr->ranges, size * 2);
-        
+
         if (!ranges) {
             log_error("Failed to grow ranges array");
             return -1;
         }
-        
+
         strarr->ranges = ranges;
         strarr->size *= 2;
     }
-    
+
     struct string ret;
     if (string_buffer_add_all(&strarr->buf, str, &ret)) {
         u64 new_size = strarr->buf.size * 2 + str.size + 1;
@@ -2776,17 +2959,17 @@ def_string_array_add(string_array_add)
             log_error("Failed to grow buffer");
             return -1;
         }
-        
+
         strarr->buf.data = buf;
         strarr->buf.size = new_size;
         string_buffer_add_all(&strarr->buf, str, &ret);
         log_error_if(!ret.data, "Failed to add string to expanded buffer (but this should be impossible!)");
     }
-    
+
     strarr->ranges[strarr->used].offset = (u64)(ret.data - strarr->buf.data);
     strarr->ranges[strarr->used].size = ret.size;
     strarr->used += 1;
-    
+
     return 0;
 }
 
@@ -2795,17 +2978,17 @@ def_string_array_get(string_array_get)
     log_error_if(strarr->used == 0, "Indexing empty array");
     log_error_if(strarr->used <= i, "Out of bounds access - max valid index %u, but got %u",
                  strarr->used - 1, i);
-    
+
     if (!ret->data) {
         ret->size = strarr->ranges[i].size;
         return 0;
     }
-    
+
     ret->size = trunc_copy(ret->data, ret->size,
                            strarr->buf.data + strarr->ranges[i].offset,
                            strarr->ranges[i].size);
     ret->data[ret->size] = 0;
-    
+
     return ret->size < strarr->ranges[i].size ? -1 : 0;
 }
 
@@ -2828,12 +3011,12 @@ def_strfind(strfind)
 {
     if (si.size < sf.size)
         return Max_u32;
-    
+
     for(u32 i=0; i < si.size - sf.size; ++i) {
         if (memcmp(si.data + i, sf.data, sf.size) == 0)
             return i;
     }
-    
+
     return Max_u32;
 }
 
@@ -2843,7 +3026,7 @@ def_strfindchar(strfindchar)
         if (si.data[i] == c)
             return i;
     }
-    
+
     return Max_u32;
 }
 
@@ -2878,14 +3061,14 @@ def_flatten_pchar_array(flatten_pchar_array)
 {
     struct string str = {.data = buf, .size = 0};
     buf_sz -= 1; // null term
-    
+
     for(u32 i=0; i < arr_sz && str.size < buf_sz; ++i) {
         str.size += trunc_copy(buf + str.size, buf_sz - str.size, arr[i], strlen(arr[i]));
         if (str.size == buf_sz)
             break;
         str.data[str.size++] = sep;
     }
-    
+
     str.data[str.size] = 0;
     return str;
 }
@@ -2904,19 +3087,19 @@ def_create_array(create_array)
 {
     if (size < ARRAY_MIN_SIZE)
         size = ARRAY_MIN_SIZE;
-    
+
     array_t *tmp = allocate(alloc, size * stride + sizeof(*tmp));
     if (!tmp) {
         log_error("Failed to allocate memory for tmp");
         return -1;
     }
-    
+
     tmp->used = 0;
     tmp->size = size;
     tmp->data = tmp + 1;
     tmp->alloc = alloc;
     *array = tmp->data;
-    
+
     return 0;
 }
 
@@ -2924,7 +3107,7 @@ def_array_add(array_add)
 {
     array_t *tmp = ((array_t*) *array) - 1;
     log_error_if(tmp->used > tmp->size, "Array overflowed");
-    
+
     if (tmp->used == tmp->size) {
         array_t old = *tmp;
         tmp = reallocate(tmp->alloc, tmp, sizeof(*tmp) + tmp->size * stride * 2);
@@ -2936,7 +3119,7 @@ def_array_add(array_add)
         tmp->size = old.size * 2;
         *array = tmp->data;
     }
-    
+
     memcpy((u8*)tmp->data + tmp->used * stride, elem, stride);
     tmp->used += 1;
     return 0;
@@ -3078,7 +3261,7 @@ static u32 dict_probe_next(dict_probe_t *probe)
 {
     if (probe->stride >= probe->dict->cap)
         return Max_u32;
-    
+
     probe->pos = (u32)mod_pow2(probe->pos + probe->stride, probe->dict->cap);
     probe->stride += DICT_GROUP_SIZE;
     return probe->pos;
@@ -3090,11 +3273,11 @@ static void* dict_iter_next_internal(dict_iter_t *iter, u64 stride)
     while(1) {
         if (iter->pos >= iter->dict->cap)
             return NULL;
-        
+
         i = dict_next_full_slot(iter->dict, iter->pos);
         if (i != Max_u32)
             break;
-        
+
         iter->pos = dict_next_group(iter->pos);
     }
     iter->pos = i + 1;
@@ -3105,7 +3288,7 @@ static int dict_copy(dict_t *new_dict, dict_t *old_dict, u64 stride)
 {
     dict_iter_t it;
     dict_get_iter(old_dict, &it);
-    
+
     struct dict_kv *kv;
     dict_iter_for_each_internal(&it, kv, stride, dict_iter_next_internal) {
         if (dict_insert_hash(new_dict, kv->key, &kv->val, stride))
@@ -3118,14 +3301,14 @@ static u32 dict_find_hash(dict_t *dict, u64 key, u64 stride)
 {
     dict_probe_t probe;
     dict_get_probe(dict, dict_group(dict, key), &probe);
-    
+
     u32 gr;
     dict_probe_loop(gr, &probe) {
         u16 mask = dict_match(dict, gr, DICT_FULL | dict_top7(key));
-        
+
         if (!mask)
             continue;
-        
+
         u32 i,cnt;
         for_bits(i, cnt, mask) {
             if (key == *(u64*)(dict->data + dict->cap + stride * (gr + i)))
@@ -3139,12 +3322,12 @@ def_create_dict(create_dict)
 {
     dict->cap = (u32)align(align(size, 16), next_pow2(size));
     dict->data = allocate(alloc, dict->cap + dict->cap * stride);
-    
+
     if (!dict->data) {
         log_error("Failed to allocate memory for dict");
         return -1;
     }
-    
+
     memset(dict->data, 0, dict->cap);
     dict->rem = dict->cap / 8 * 7;
     dict->alloc = alloc;
@@ -3164,23 +3347,23 @@ def_dict_insert_hash(dict_insert_hash)
         }
         destroy_dict(&old_dict, stride);
     }
-    
+
     dict_probe_t probe;
     dict_get_probe(dict, dict_group(dict, key), &probe);
-    
+
     u32 gr;
     dict_probe_loop(gr, &probe) {
         u32 i = dict_next_empty_slot(dict, gr);
         if (i != Max_u32) {
             u8 *slot = dict->data + i;
             *slot = DICT_FULL | dict_top7(key);
-            
+
             struct dict_kv *kv = (typeof(kv))(dict->data + dict->cap + stride * i);
             kv->key = key;
-            
+
             void *v = &kv->val;
-            memcpy(v, val, stride - DICT_HASH_SIZE);
-            
+            memcpy(v, val, size);
+
             dict->rem -= 1;
             return 0;
         }
@@ -3204,7 +3387,7 @@ def_dict_find(dict_find)
     u32 i = dict_find_hash(dict, rapidhash(key.data, key.size), stride);
     if (i == Max_u32)
         return false;
-    
+
     memcpy(ret, dict->data + dict->cap + stride * i + DICT_HASH_SIZE, stride - DICT_HASH_SIZE);
     return true;
 }
@@ -3212,10 +3395,10 @@ def_dict_find(dict_find)
 def_dict_remove(dict_remove)
 {
     u32 i = dict_find_hash(dict, rapidhash(key.data, key.size), stride);
-    
+
     if (i == Max_u32)
         return false;
-    
+
     u8 *slot = dict-> data + i;
     *slot = DICT_EMPTY;
     return true;
@@ -3233,15 +3416,15 @@ def_dict_iter_next(dict_iter_next)
     while(1) {
         if (iter->pos >= iter->dict->cap)
             return false;
-        
+
         i = dict_next_full_slot(iter->dict, iter->pos);
         if (i != Max_u32)
             break;
-        
+
         iter->pos = dict_next_group(iter->pos);
     }
     iter->pos = i + 1;
-    memcpy(ret, iter->dict->data + iter->dict->cap + stride * i + DICT_HASH_SIZE, stride - DICT_HASH_SIZE);
+    memcpy(ret, iter->dict->data + iter->dict->cap + stride * i + DICT_HASH_SIZE, size);
     return true;
 }
 
