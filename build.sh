@@ -1,7 +1,7 @@
 #!/bin/bash
 
 code="$PWD"
-opts="-g -Wall -Wextra -Werror -msse2 -DSOL_DEF"
+opts="-std=gnu99 -g -Wall -Wextra -Werror -Wno-unused-parameter -msse2 -DDEBUG -DSOL_DEF"
 cd . > /dev/null
 gcc $opts $code/main.c -o test
 cd $code > /dev/null

@@ -13,10 +13,13 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
+#include <sys/stat.h>
+#include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 #define SCB_OVERRIDE_STDLIB
@@ -98,10 +101,11 @@ typedef void (*voidpfn)(void);
 #else
 #define gcc_align(x) __attribute__((aligned(x)))
 #define msvc_align(x)
+#define offsetof(type, memb) __builtin_offsetof(type, memb)
 #endif
 
 #define memb_to_struct(memb, memb_of, memb_name) \
-((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
+    ((typeof(memb_of))((u8*)memb - offsetof(typeof(*memb_of), memb_name)))
 
 #define memb_size(type, memb) sizeof(((type*)0)->memb)
 #define struct_memb(type, memb) (((type*)0)->memb)
@@ -115,7 +119,7 @@ do { \
 
 #define for_bits(pos, count, mask) \
     for(count = 0, pos = (typeof(pos))ctz(mask); \
-        count < popcnt(mask); \
+        count < (u64)popcnt(mask); \
         pos = (typeof(pos))ctz((u64)mask & (Max_u64 << (pos + 1))), ++count)
 
 static inline u64 trunc_copy(void *to, u64 to_sz, void *from, u64 from_sz)
@@ -146,39 +150,46 @@ enum type {
 #define stringify_(...) #__VA_ARGS__
 #define stringify(...) stringify_(__VA_ARGS__)
 
-#define typecheck(a, b) \
-    do { \
-        typeof(a) m__typecheck = b; \
-        m__typecheck = m__typecheck; \
-    while(0)
+// does not work with lvalues
+#define typecheck(a, b, c) (b = (typeof(a))b, c)
+
+// necessary for lvalue references
+#define ptypecheck(a, b, c) (*b = *(typeof(a))b, c)
 
 #define def_wrapper_fn(wrapper_name, wrapped_name, ret_type, wrapper_args, wrapped_args) \
     static inline ret_type wrapper_name(wrapper_args) { return (ret_type)wrapped_name(wrapped_args); }
 
 // os.h
 
-// NOTE(SollyCB) os_fd will be 4 bytes larger on Windows which will mess with alignment,
+// NOTE(SollyCB) os_handle will be 4 bytes larger on Windows which will mess with alignment,
 // but this
 
-#if _WIN32
-#define os_fd HANDLE
-#define OS_INVALID_FD INVALID_HANDLE_VALUE
-#else
-#define os_fd int
-#define OS_INVALID_FD -1
-#endif
+typedef union os_handle {
+        void *handle;
+#   if _WIN32
+#       define OS_INVALID_HANDLE INVALID_HANDLE_VALUE
+#   else
+#       define OS_INVALID_HANDLE ((void*)-1)
+        void *dl;
+        pid_t pid;
+        int fd;
+#   endif
+} os_handle;
+
+#define os_handle_is_valid(handle) (handle.handle != OS_INVALID_HANDLE)
+#define os_fd_to_handle(fd) ((os_handle)(void*)(s64)fd)
 
 extern struct os {
     bool is_valid;
     u32 page_size;
     u32 thread_count;
-    os_fd stdin_handle;
-    os_fd stdout_handle;
-    os_fd stderr_handle;
+    os_handle stdin_handle;
+    os_handle stdout_handle;
+    os_handle stderr_handle;
 } os;
 
 struct os_process {
-    os_fd p,t; // process and thread handle
+    os_handle p,t; // process and thread handle
 };
 
 #define def_create_os(name) void name(void)
@@ -196,16 +207,16 @@ def_os_deallocate(os_deallocate);
 #define def_os_page_size(name) u32 name(void)
 def_os_page_size(os_page_size);
 
-#define def_os_stdout(name) os_fd name(void)
+#define def_os_stdout(name) os_handle name(void)
 def_os_stdout(os_stdout);
 
-#define def_os_create_lib(name) void* name(char *uri)
+#define def_os_create_lib(name) os_handle name(char *uri)
 def_os_create_lib(os_create_lib);
 
-#define def_os_libproc(name) voidpfn name(void *lib, char *proc)
+#define def_os_libproc(name) voidpfn name(os_handle lib, char *proc)
 def_os_libproc(os_libproc);
 
-#define def_os_destroy_lib(name) void name(void *lib)
+#define def_os_destroy_lib(name) void name(os_handle lib)
 def_os_destroy_lib(os_destroy_lib);
 
 #define def_os_create_process(name) int name(char *cmdline, struct os_process *p)
@@ -249,26 +260,26 @@ static inline bool rc_dec(rc_t *rc)
 #define def_write_stdout(name) void name(char *buf, u64 size)
 def_write_stdout(write_stdout);
 
-#define def_write_file(name) u64 name(char *uri, void *buf, u64 size)
+#define def_write_file(name) u64 name(char *uri, void *buf, u64 size, u64 ofs)
 def_write_file(write_file);
 
-#define def_read_file(name) u64 name(char *uri, void *buf, u64 size)
+#define def_read_file(name) u64 name(char *uri, void *buf, u64 size, u64 ofs)
 def_read_file(read_file);
 
 enum create_fd_flags {
     CREATE_FD_READ = 0x01,
     CREATE_FD_WRITE = 0x02,
 };
-#define def_create_fd(name) os_fd name(char *uri, u32 flags)
+#define def_create_fd(name) os_handle name(char *uri, u32 flags)
 def_create_fd(create_fd);
 
-#define def_destroy_fd(name) void name(os_fd fd)
+#define def_destroy_fd(name) void name(os_handle fd)
 def_destroy_fd(destroy_fd);
 
-#define def_write_fd(name) u64 name(os_fd fd, void *buf, u64 size)
+#define def_write_fd(name) u64 name(os_handle fd, void *buf, u64 size, u64 ofs)
 def_write_fd(write_fd);
 
-#define def_read_fd(name) u64 name(os_fd fd, void *buf, u64 size)
+#define def_read_fd(name) u64 name(os_handle fd, void *buf, u64 size, u64 ofs)
 def_read_fd(read_fd);
 
 #define def_copy_file(name) int name(char *fnew, char *fold)
@@ -321,6 +332,12 @@ do { \
 } while(0);
 
 // assert.h
+#ifdef _WIN32
+#define scb_debugbreak() __debugbreak()
+#else
+#define scb_debugbreak() __builtin_trap()
+#endif
+
 #define scb_assert(x) \
     if (!(x)) { \
         println("[%s, %s, %u] ASSERT : %s", __FILE__, __FUNCTION__, __LINE__, #x); \
@@ -328,12 +345,6 @@ do { \
     }
 
 #if DEBUG
-
-#ifdef _WIN32
-#define scb_debugbreak() __debugbreak()
-#else
-#define scb_debugbreak() __builtin_trap()
-#endif
 
 #define log_break scb_debugbreak()
 
@@ -359,10 +370,10 @@ do { \
 #endif
 
 #define log_error_if(prec, ...) \
-    do { if (prec) log_error(__VA_ARGS__); } while(0);
+    do { if (prec) {log_error(__VA_ARGS__);} } while(0);
 
 #define log_os_error_if(prec, ...) \
-    do { if (prec) log_os_error(__VA_ARGS__); } while(0);
+    do { if (prec) {log_os_error(__VA_ARGS__);} } while(0);
 
 #define invalid_default_case log_error("Invalid default case")
 
@@ -1482,54 +1493,53 @@ static inline bool list_remove(list_t *list)
     return true;
 }
 
-#define list_is_end(it, head, memb_name) \
-(&it->memb_name == head)
+#define list_is_end(it, head, memb_name) (&it->memb_name == head)
 
 #define list_for_each(it, head, memb_name) \
-for(it = memb_to_struct((head)->next, it, memb_name); \
-!list_is_end(it, head, memb_name); \
-it = memb_to_struct(it->memb_name.next, it, memb_name))
+    for(it = memb_to_struct((head)->next, it, memb_name); \
+        !list_is_end(it, head, memb_name); \
+        it = memb_to_struct(it->memb_name.next, it, memb_name))
 
 #define list_for_each_rev(it, head, memb_name) \
-for(it = memb_to_struct((head)->prev, it, memb_name); \
-!list_is_end(it, head, memb_name); \
-it = memb_to_struct(it->memb_name.prev, it, memb_name))
+    for(it = memb_to_struct((head)->prev, it, memb_name); \
+        !list_is_end(it, head, memb_name); \
+        it = memb_to_struct(it->memb_name.prev, it, memb_name))
 
 #define list_for_each_safe(it, tmp, head, memb_name) \
-for(it = memb_to_struct((head)->next, it, memb_name), \
-tmp = memb_to_struct(it->memb_name.next, it, memb_name); \
-!list_is_end(it, head, memb_name); \
-it = tmp, \
-tmp = memb_to_struct(it->memb_name.next, it, memb_name))
+    for(it = memb_to_struct((head)->next, it, memb_name), \
+        tmp = memb_to_struct(it->memb_name.next, it, memb_name); \
+        !list_is_end(it, head, memb_name); \
+        it = tmp, \
+        tmp = memb_to_struct(it->memb_name.next, it, memb_name))
 
 #define list_for_each_rev_safe(it, tmp, head, memb_name) \
-for(it = memb_to_struct((head)->prev, it, memb_name), \
-tmp = memb_to_struct(it->memb_name.prev, it, memb_name); \
-!list_is_end(it, head, memb_name); \
-it = tmp, \
-tmp = memb_to_struct(it->memb_name.prev, it, memb_name))
+    tmp = memb_to_struct(it->memb_name.prev, it, memb_name); \
+    for(it = memb_to_struct((head)->prev, it, memb_name), \
+        !list_is_end(it, head, memb_name); \
+        it = tmp, \
+        tmp = memb_to_struct(it->memb_name.prev, it, memb_name))
 
 #define list_for(it, head, memb_name, count) \
-for(it = memb_to_struct((head)->next, it, memb_name); \
-count--; \
-it = memb_to_struct(it->memb_name.next, it, memb_name))
+    for(it = memb_to_struct((head)->next, it, memb_name); \
+        count--; \
+        it = memb_to_struct(it->memb_name.next, it, memb_name))
 
 #define list_for_rev(it, head, memb_name, count) \
-for(it = memb_to_struct((head)->prev, it, memb_name); \
-count--; \
-it = memb_to_struct(it->memb_name.prev, it, memb_name))
+    for(it = memb_to_struct((head)->prev, it, memb_name); \
+        count--; \
+        it = memb_to_struct(it->memb_name.prev, it, memb_name))
 
 #define list_for_safe(it, tmp, head, memb_name, count) \
-for(it = memb_to_struct((head)->next, it, memb_name), \
-tmp = memb_to_struct(it->memb_name.next, it, memb_name); \
-count--; it = tmp, \
-tmp = memb_to_struct(it->memb_name.next, it, memb_name))
+    for(it = memb_to_struct((head)->next, it, memb_name), \
+        tmp = memb_to_struct(it->memb_name.next, it, memb_name); \
+        count--; it = tmp, \
+        tmp = memb_to_struct(it->memb_name.next, it, memb_name))
 
 #define list_for_rev_safe(it, tmp, head, memb_name, count) \
-for(it = memb_to_struct((head)->prev, it, memb_name), \
-tmp = memb_to_struct(it->memb_name.prev, it, memb_name); \
-count--; it = tmp, \
-tmp = memb_to_struct(it->memb_name.prev, it, memb_name))
+    for(it = memb_to_struct((head)->prev, it, memb_name), \
+        tmp = memb_to_struct(it->memb_name.prev, it, memb_name); \
+        count--; it = tmp, \
+        tmp = memb_to_struct(it->memb_name.prev, it, memb_name))
 
 // alloc.h
 typedef struct allocator allocator_t;
@@ -1791,11 +1801,13 @@ static inline void dbg_strfmt_stub(struct string str, ...) {}
 #define def_array_add_ret int
 #define def_destroy_array_ret void
 
+#if 0 // I am going to redo this with my new typecheck macro
 #define def_typed_array(abbrev, type) \
-typedef typeof(type)* abbrev ## _array_t; \
-def_wrapper_fn(create_ ## abbrev ## _array, create_array, def_create_array_ret, def_create_array_args(abbrev ## _array_t), paste(size, alloc, array, sizeof(**array))) \
-def_wrapper_fn(abbrev ## _array_add, array_add, def_array_add_ret, def_array_add_args(abbrev ## _array_t, type), paste(array, elem, sizeof(**array))) \
-def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_ret, def_destroy_array_args(abbrev ## _array_t), paste(array, sizeof(**array)))
+    typedef typeof(type)* abbrev ## _array_t; \
+    def_wrapper_fn(create_ ## abbrev ## _array, create_array, def_create_array_ret, def_create_array_args(abbrev ## _array_t), paste(size, alloc, (void**)array, sizeof(**array))) \
+    def_wrapper_fn(abbrev ## _array_add, array_add, def_array_add_ret, def_array_add_args(abbrev ## _array_t, type), paste(array, elem, sizeof(**array))) \
+    def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_ret, def_destroy_array_args(abbrev ## _array_t), paste(array, sizeof(**array)))
+#endif
 
 #define def_create_array(name) def_create_array_ret name(def_create_array_args(void*), u64 stride)
 #define def_array_add(name) def_array_add_ret name(def_array_add_args(void*, void), u64 stride)
@@ -1823,6 +1835,16 @@ def_large_set_test(large_set_test);
 def_large_set_rm(large_set_rm);
 
 // dict.h
+
+/*
+ * This implementation is ugly to look at but nice to interact with from a user point of view.
+ * That being said, I would really like to figure out a way to reimplement it using my new 'typecheck'
+ * macros, but I cannot immediately see a great way to do that without compromising on struct definitions
+ * and storing more pointers than I would like for type comparison purposes. Since this setup was a pain
+ * to implement, but works really well from a user standpoint, I will not replace it for now, but I would
+ * like to in future, because the macros here are hardly gorgeous...
+ */
+
 typedef struct dict dict_t;
 typedef struct dict_iter dict_iter_t;
 
@@ -1877,9 +1899,9 @@ typedef struct dict_iter dict_iter_t;
 //     thing_dict_iter_t iter;
 //     thing_dict_get_iter(&dict, &iter);
 // 
-//     struct thing_dict_kv kv;
-//     dict_for_each(&iter, thing_dict_iter_next, &kv) {
-//         println("key %u, thing.s %s", kv->key, kv->val.s)
+//     struct thing t;
+//     dict_for_each(&iter, thing_dict_iter_next, &t) {
+//         println("key %u, thing.s %s", t.s)
 //     }
 // 
 //     destroy_thing_dict(&dict);
@@ -1914,7 +1936,7 @@ typedef struct dict_iter dict_iter_t;
 #define def_dict_find(name) bool dict_find(dict_t *dict, struct string key, void *ret, u64 stride, u64 size)
 #define def_dict_remove(name) bool dict_remove(dict_t *dict, struct string key, u64 stride)
 #define def_dict_get_iter(name) void dict_get_iter(dict_t *dict, dict_iter_t *iter)
-#define def_dict_iter_next(name) bool dict_iter_next(dict_iter_t *iter, void *ret, u64 stride)
+#define def_dict_iter_next(name) bool dict_iter_next(dict_iter_t *iter, void *ret, u64 stride, u64 size)
 #define def_destroy_dict(name) void destroy_dict(dict_t *dict, u64 stride)
 
 def_create_dict(create_dict);
@@ -1930,7 +1952,7 @@ def_get_dict_key(get_dict_key);
 
 // pass a reference to a kv and an iter (see above example)
 #define dict_for_each(dict_iter, func, kv) \
-while(func(dict_iter, kv))
+    while(func(dict_iter, kv))
 
 #define def_dict_kv(name, type) \
     struct name { \
@@ -1956,12 +1978,12 @@ while(func(dict_iter, kv))
     def_dict_kv(abbrev ## _dict_kv, typeof(value)) \
     def_dict(abbrev ## _dict, struct abbrev ## _dict_kv) \
     def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t) \
-    def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, alloc, (dict_t*)dict), sizeof(*dict->data)) \
-    def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data), sizeof(*dict->data->val))) \
-    def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(), typed_dict_find_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, ret), sizeof(*dict->data), sizeof(*dict->data->val)) \
+    def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, alloc, (dict_t*)dict, sizeof(*dict->data))) \
+    def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data), sizeof(dict->data->val))) \
+    def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(), typed_dict_find_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, ret, sizeof(*dict->data), sizeof(dict->data->val))) \
     def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(), typed_dict_remove_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
     def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(), typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t), paste((dict_t*)dict, (dict_iter_t*)iter)) \
-    def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(), typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)), paste((dict_iter_t*)iter, ret, sizeof(*iter->dict->data))) \
+    def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(), typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)), paste((dict_iter_t*)iter, ret, sizeof(*iter->dict->data), sizeof(iter->dict->data->val))) \
     def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(), typed_dict_destroy_args(abbrev ## _dict_t), paste((dict_t*)dict, sizeof(*dict->data)))
 
 #ifdef SOL_DEF
@@ -1995,7 +2017,7 @@ def_os_allocate(os_allocate)
 def_os_deallocate(os_deallocate)
 {
     bool b = VirtualFree(p, 0, MEM_RELEASE);
-    log_os_error_if(!b, "Failed to free address %u", p);
+    log_os_error_if(!b, "Failed to free address %uh with size %u", p, size);
 }
 
 def_os_page_size(os_page_size)
@@ -2066,13 +2088,15 @@ def_os_sleep_ms(os_sleep_ms)
     Sleep(ms);
 }
 #else
+// #define getpagesize() sysconf(PAGESIZE)
+
 def_create_os(create_os)
 {
     assert(os.is_valid == false);
     os.page_size = getpagesize();
-    os.stdin_handle = 0;
-    os.stdout_handle = 1;
-    os.stderr_handle = 2;
+    os.stdin_handle.fd = 0;
+    os.stdout_handle.fd = 1;
+    os.stderr_handle.fd = 2;
     os.thread_count = get_nprocs();
 }
 
@@ -2092,16 +2116,27 @@ def_os_error_string(os_error_string)
 
 def_os_allocate(os_allocate)
 {
-    log_error_if(p == NULL, "Failed to allocate %u bytes from OS", size);
+    if (os.is_valid == false)
+        create_os();
+
+    size = align(size, os.page_size);
+
+    // EXPERIMENT(SollyCB): Performance of private and shared anonymous mappings.
+    void *p = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    log_os_error_if(p == NULL, "Failed to allocate %u bytes from OS", size);
+
+    return p;
 }
 
 def_os_deallocate(os_deallocate)
 {
-    log_os_error_if(b == false, "Failed to free address %u", p);
+    int e = munmap(p, size);
+    log_os_error_if(e, "Failed to free address %uh with size %u", p, size);
 }
 
 def_os_page_size(os_page_size)
 {
+    return os.page_size;
 }
 
 def_os_stdout(os_stdout)
@@ -2113,31 +2148,50 @@ def_os_stdout(os_stdout)
 
 def_os_create_lib(os_create_lib)
 {
+    // scb - The linux apis are sooooo much cooler than the Windows ones, holy shit!
+    void *dl = dlopen(uri, RTLD_NOW);
+    log_os_error_if(dl == NULL, "Failed to open library %s", uri);
+    return (os_handle)dl;
 }
 
 def_os_libproc(os_libproc)
 {
+    void *p = dlsym(lib.dl, proc);
+    log_os_error_if(p == NULL, "Failed to get library symbol %u", proc);
+    return p;
 }
 
 def_os_destroy_lib(os_destroy_lib)
 {
+    int e = dlclose(lib.dl);
+    log_os_error_if(e, "Failed to close library");
 }
 
+// These do not seem completely trivial, so I will leave them for a bit. I could just use system, but I cba
+// to take the time to really understand its return values, and I would rather do it properly with fork and
+// exec when I actually want to use these. The last time I was using them was for a pretty lame work around
+// anyway so hopefully next time I need them, I can think of something better.
+#if 0
 def_os_create_process(os_create_process)
 {
+    assert(false && "UNIMPLEMENTED");
 }
 
 def_os_await_process(os_await_process)
 {
+    assert(false && "UNIMPLEMENTED");
 }
 
 def_os_destroy_process(os_destroy_process)
 {
+    assert(false && "UNIMPLEMENTED");
 }
 
 def_os_sleep_ms(os_sleep_ms)
 {
 }
+#endif // unimplemented linux process functions
+
 #endif
 
 // file.c
@@ -2211,7 +2265,7 @@ def_read_file(read_file)
 
 def_create_fd(create_fd)
 {
-    os_fd fd;
+    os_handle fd;
     if (flags == CREATE_FD_WRITE) {
         fd = CreateFile(uri, GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
                         FILE_ATTRIBUTE_NORMAL, NULL);
@@ -2225,7 +2279,7 @@ def_create_fd(create_fd)
 
     if (fd == INVALID_HANDLE_VALUE) {
         log_os_error("Failed to get file handle");
-        return OS_INVALID_FD;
+        return OS_INVALID_HANDLE;
     }
 
     return fd;
@@ -2339,44 +2393,113 @@ def_cmpftim(cmpftim)
     return Max_s32;
 }
 #else
+int stat_file(char *uri, struct stat *sb)
+{
+    if (stat(uri, sb)) {
+        log_os_error("Failed to stat file %s", uri);
+        return -1;
+    }
+    return 0;
+}
+
 def_write_stdout(write_stdout)
 {
+    write(os.stdout_handle.fd, buf, size);
 }
 
 def_write_file(write_file)
 {
+    if (buf == NULL) {
+        struct stat sb;
+        if (stat_file(uri, &sb))
+            return FILE_ERROR;
+        return sb.st_size;
+    }
+
+    int fd = open(uri, O_WRONLY|O_CREAT, S_IWUSR|S_IRUSR);
+    if (fd < 0) {
+        log_os_error("Failed to open file %s", uri);
+        return FILE_ERROR;
+    }
+    s64 r = pwrite(fd, buf, size, ofs);
+    int e = close(fd);
+    log_os_error_if((e=e), "Failed to close file %s", uri);
+    return r;
 }
 
 def_read_file(read_file)
 {
+    int fd = open(uri, O_RDONLY, 0);
+    if (fd < 0) {
+        log_os_error("Failed to open file %s", uri);
+        return FILE_ERROR;
+    }
+    s64 r = pread(fd, buf, size, ofs);
+    int e = close(fd);
+    log_error_if((e = e), "Failed to close file %s", uri)
+    return r;
 }
 
 def_create_fd(create_fd)
 {
+    int f = 0;
+    if (flags == CREATE_FD_READ) f = O_RDONLY;
+    else if (flags == CREATE_FD_WRITE) f = O_WRONLY;
+    else f = O_RDWR;
+    int fd = open(uri, f, S_IRUSR|S_IWUSR);
+    log_os_error_if(fd < 0, "Failed to open file %s", uri);
+    return os_fd_to_handle(fd);
 }
 
 def_destroy_fd(destroy_fd)
 {
+    int e = close(fd.fd);
+    log_os_error_if((e=e), "Failed to close file descriptor %i", (s64)fd.fd);
 }
 
 def_write_fd(write_fd)
 {
+    s64 r = pwrite(fd.fd, buf, size, ofs);
+    log_os_error_if(r < 0, "Failed to write to file descriptor %i", (s64)fd.fd);
+    return r;
 }
 
 def_read_fd(read_fd)
 {
+    s64 r = pread(fd.fd, buf, size, ofs);
+    log_os_error_if(r < 0, "Failed to read from file descriptor %i", (s64)fd.fd);
+    return r;
 }
 
 def_copy_file(copy_file)
 {
+    u64 sz = read_file(fold, NULL, 0, 0);
+    void *buf = os_allocate(sz);
+
+    if (read_file(fold, buf, sz, 0) == FILE_ERROR) {
+        log_error("Failed to read file %s in order to copy to %s", fold, fnew);
+        return -1;
+    }
+
+    if (write_file(fnew, buf, sz, 0) == FILE_ERROR) {
+        log_error("Failed to write file %s in order to copy from %s", fnew, fold);
+        return -1;
+    }
+
+    return 0;
 }
 
 def_trunc_file(trunc_file)
 {
+    return truncate(uri, sz);
 }
 
 def_getftim(getftim)
 {
+        struct stat sb;
+        if (stat_file(uri, &sb))
+            return FILE_ERROR;
+        return sb.st_mtim.tv_sec; // scb :- windows returns such a dumb value compared to this...
 }
 
 def_cmpftim(cmpftim)
@@ -2567,7 +2690,7 @@ def_snprintf(scb_snprintf)
             double x = va_arg(va, double);
             bp += pr_parse_f(buf + bp, size - bp - 1, x, f);
         } else if (f & PR_C) {
-            char x = va_arg(va, char);
+            char x = (char)va_arg(va, u64);
             bp += pr_parse_c(buf + bp, size - bp - 1, x, f);
         }
     }
@@ -2643,7 +2766,7 @@ static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
 static void destroy_arena_block(arena_t *alloc, struct arena_header *block)
 {
     list_remove(&block->list);
-    os_deallocate(block->linear.data, block->linear.size + ARENA_HEADER_SIZE);
+    os_deallocate(block, block->linear.size + ARENA_HEADER_SIZE);
     alloc->block_count -= alloc->block_count > 0;
 }
 
@@ -3202,7 +3325,7 @@ for(idx = dict_probe_next(probe); idx != Max_u32; idx = dict_probe_next(probe))
 #define dict_iter_for_each_internal(it, kv, stride, func) \
 for(kv = func(it, stride); kv; kv = func(it, stride))
 
-#define def_dict_insert_hash(name) static int name(dict_t *dict, u64 key, void *val, u64 stride)
+#define def_dict_insert_hash(name) static int name(dict_t *dict, u64 key, void *val, u64 stride, u64 size)
 def_dict_insert_hash(dict_insert_hash);
 
 static inline u8 dict_top7(u64 key)
@@ -3284,14 +3407,14 @@ static void* dict_iter_next_internal(dict_iter_t *iter, u64 stride)
     return iter->dict->data + iter->dict->cap + stride * i;
 }
 
-static int dict_copy(dict_t *new_dict, dict_t *old_dict, u64 stride)
+static int dict_copy(dict_t *new_dict, dict_t *old_dict, u64 stride, u64 size)
 {
     dict_iter_t it;
     dict_get_iter(old_dict, &it);
 
     struct dict_kv *kv;
     dict_iter_for_each_internal(&it, kv, stride, dict_iter_next_internal) {
-        if (dict_insert_hash(new_dict, kv->key, &kv->val, stride))
+        if (dict_insert_hash(new_dict, kv->key, &kv->val, stride, size))
             return -1;
     }
     return 0;
@@ -3338,8 +3461,8 @@ def_dict_insert_hash(dict_insert_hash)
 {
     if (dict->rem == 0) {
         dict_t old_dict = *dict;
-        if (create_dict(dict->cap * 2, stride, dict->alloc, dict) ||
-            dict_copy(dict, &old_dict, stride))
+        if (create_dict(dict->cap * 2, dict->alloc, dict, stride) ||
+            dict_copy(dict, &old_dict, stride, size))
         {
             log_error("Failed to initialize new dict on resize");
             *dict = old_dict;
@@ -3379,7 +3502,7 @@ def_get_dict_key(get_dict_key)
 
 def_dict_insert(dict_insert)
 {
-    return dict_insert_hash(dict, rapidhash(key.data, key.size), val, stride);
+    return dict_insert_hash(dict, rapidhash(key.data, key.size), val, stride, size);
 }
 
 def_dict_find(dict_find)
