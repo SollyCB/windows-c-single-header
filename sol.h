@@ -13,13 +13,14 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
-#include <unistd.h>
+#include <time.h>
 #endif
 
 #define SCB_OVERRIDE_STDLIB
@@ -403,8 +404,11 @@ do { \
 #define mb(x) (kb(x) * (u64)1024UL)
 #define gb(x) (mb(x) * (u64)1024UL)
 
-#define secs_to_ms(x) ((x) * (u64)1000)
-#define secs_to_ns(x) ((x) * (u64)1e9)
+#define secs_to_ms(x) ((u64)(x) * (u64)1000)
+#define secs_to_ns(x) ((u64)(x) * (u64)1e9)
+
+#define ms_to_secs(x) ((u64)(x) / 1000)
+#define ms_to_ns(x)   ((u64)(x) * 1000000)
 
 struct offset_u32 { u32 x,y; };
 struct extent_u32 { u32 w,h; };
@@ -2139,8 +2143,8 @@ def_os_sleep_ms(os_sleep_ms)
 {
     Sleep(ms);
 }
+
 #else
-// #define getpagesize() sysconf(PAGESIZE)
 
 def_create_os(create_os)
 {
@@ -2238,11 +2242,26 @@ def_os_destroy_process(os_destroy_process)
 {
     assert(false && "UNIMPLEMENTED");
 }
+#endif // unimplemented linux process functions
+
+inline_fn int checked_nanosleep(struct timespec *req,  struct timespec *rem)
+{
+    switch(nanosleep(req, rem)) {
+        case EINTR: println("OMG! We got an interrupt! This is what all that time in the simulator was for!"); // continue
+        case 0: break;
+        default: return -1;
+    }
+    return 0;
+}
 
 def_os_sleep_ms(os_sleep_ms)
 {
+    struct timespec req,rem;
+    req.tv_sec = ms_to_secs(ms);
+    req.tv_nsec = ms_to_ns(ms - secs_to_ms(req.tv_sec));
+    int e = checked_nanosleep(&req, &rem);
+    log_os_error_if((e=e), "Failed to sleep for %ums", ms); 
 }
-#endif // unimplemented linux process functions
 
 #endif
 
