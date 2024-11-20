@@ -111,15 +111,15 @@ typedef void (*voidpfn)(void);
 #define struct_memb(type, memb) (((type*)0)->memb)
 
 #define swap(a, b) \
-do { \
-    typeof(a) m__swap_tmp = a; \
-        a = b; \
-        b = m__swap_tmp; \
+    do {                           \
+        typeof(a) m__swap_tmp = a; \
+        a = b;                     \
+        b = m__swap_tmp;           \
     } while(0);
 
 #define for_bits(pos, count, mask) \
     for(count = 0, pos = (typeof(pos))ctz(mask); \
-        count < (u64)popcnt(mask); \
+        count < (u64)popcnt(mask);               \
         pos = (typeof(pos))ctz((u64)mask & (Max_u64 << (pos + 1))), ++count)
 
 static inline u64 trunc_copy(void *to, u64 to_sz, void *from, u64 from_sz)
@@ -150,6 +150,22 @@ enum type {
 #define stringify_(...) #__VA_ARGS__
 #define stringify(...) stringify_(__VA_ARGS__)
 
+/*
+ * I thought that the below type checker macros would be superior to the def_wrapper_fn method, but now I
+ * think that the former is actually a really nice solution: it is certainly more effort intensive to
+ * use than typecheck macros, but not as annoying as I previously thought, (after just formatting the dict
+ * macro so each bit is laid out clearly, I do not think that it would be particularly difficult to write
+ * again).
+ *
+ * Furthermore, the frontend of the def_wrapper solution is basically perfect because you are just calling
+ * actual, properly declared functions, as if you had just written them yourself: the compiler errors about
+ * misuse are exactly what to expect, they show up as function calls in LSP function docs so you can see
+ * the types of the arguments, unlike a macro call.
+ *
+ * So yeah, after testing out other solutions which make writing the backend a bit less cumbersome, I actually
+ * think that I have a pretty good solution in the def_wrapper_fn macro.
+ */
+
 // does not work with lvalues
 #define typecheck(a, b, c) (b = (typeof(a))b, c)
 
@@ -164,16 +180,21 @@ enum type {
 // NOTE(SollyCB) os_handle will be 4 bytes larger on Windows which will mess with alignment,
 // but this
 
+#ifdef _WIN32
+#define OS_INVALID_HANDLE INVALID_HANDLE_VALUE
+#else
+#define OS_INVALID_HANDLE ((void*)-1)
+#endif
+
 typedef union os_handle {
         void *handle;
-#   if _WIN32
-#       define OS_INVALID_HANDLE INVALID_HANDLE_VALUE
-#   else
-#       define OS_INVALID_HANDLE ((void*)-1)
+
+#ifndef _WIN32
         void *dl;
         pid_t pid;
         int fd;
-#   endif
+#endif
+
 } os_handle;
 
 #define os_handle_is_valid(handle) (handle.handle != OS_INVALID_HANDLE)
@@ -1801,13 +1822,20 @@ static inline void dbg_strfmt_stub(struct string str, ...) {}
 #define def_array_add_ret int
 #define def_destroy_array_ret void
 
-#if 0 // I am going to redo this with my new typecheck macro
 #define def_typed_array(abbrev, type) \
-    typedef typeof(type)* abbrev ## _array_t; \
-    def_wrapper_fn(create_ ## abbrev ## _array, create_array, def_create_array_ret, def_create_array_args(abbrev ## _array_t), paste(size, alloc, (void**)array, sizeof(**array))) \
-    def_wrapper_fn(abbrev ## _array_add, array_add, def_array_add_ret, def_array_add_args(abbrev ## _array_t, type), paste(array, elem, sizeof(**array))) \
-    def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_ret, def_destroy_array_args(abbrev ## _array_t), paste(array, sizeof(**array)))
-#endif
+    typedef typeof(type)* abbrev ## _array_t;                                          \
+                                                                                       \
+    def_wrapper_fn(create_ ## abbrev ## _array, create_array, def_create_array_ret,    \
+            def_create_array_args(abbrev ## _array_t),                                 \
+            paste(size, alloc, (void**)array, sizeof(**array)))                        \
+                                                                                       \
+    def_wrapper_fn(abbrev ## _array_add, array_add, def_array_add_ret,                 \
+            def_array_add_args(abbrev ## _array_t, type),                              \
+            paste(array, elem, sizeof(**array)))                                       \
+                                                                                       \
+    def_wrapper_fn(destroy_ ## abbrev ## _array, destroy_array, def_destroy_array_ret, \
+            def_destroy_array_args(abbrev ## _array_t),                                \
+            paste(array, sizeof(**array)))
 
 #define def_create_array(name) def_create_array_ret name(def_create_array_args(void*), u64 stride)
 #define def_array_add(name) def_array_add_ret name(def_array_add_args(void*, void), u64 stride)
@@ -1837,6 +1865,10 @@ def_large_set_rm(large_set_rm);
 // dict.h
 
 /*
+ * After testing out my typecheck macros, I have actually settled on (for now) the def_wrapper_fn
+ * type safety solution. See preproc.h for a more detailed explanation.
+ *
+ *  --- DEPRECATED COMMENT, SEE ABOVE ---
  * This implementation is ugly to look at but nice to interact with from a user point of view.
  * That being said, I would really like to figure out a way to reimplement it using my new 'typecheck'
  * macros, but I cannot immediately see a great way to do that without compromising on struct definitions
@@ -1951,40 +1983,60 @@ def_destroy_dict(destroy_dict);
 def_get_dict_key(get_dict_key);
 
 // pass a reference to a kv and an iter (see above example)
-#define dict_for_each(dict_iter, func, kv) \
-    while(func(dict_iter, kv))
+#define dict_for_each(dict_iter, func, kv) while(func(dict_iter, kv))
 
 #define def_dict_kv(name, type) \
     struct name { \
-        u64 key; \
+        u64 key;  \
         type val; \
     };
 
 #define def_dict(name, kv_name) \
-    typedef struct name { \
-        u32 cap; \
-        u32 rem; \
-        kv_name *data; \
+    typedef struct name {   \
+        u32 cap;            \
+        u32 rem;            \
+        kv_name *data;      \
         allocator_t *alloc; \
     } name ## _t;
 
 #define def_dict_iter(name, dict_name) \
     typedef struct name { \
-        dict_name *dict; \
-        u32 pos; \
+        dict_name *dict;  \
+        u32 pos;          \
     } name ## _t;
 
 #define def_typed_dict(abbrev, value) \
-    def_dict_kv(abbrev ## _dict_kv, typeof(value)) \
-    def_dict(abbrev ## _dict, struct abbrev ## _dict_kv) \
-    def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t) \
-    def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(), create_typed_dict_args(abbrev ## _dict_t), paste(size, alloc, (dict_t*)dict, sizeof(*dict->data))) \
-    def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(), typed_dict_insert_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, val, sizeof(*dict->data), sizeof(dict->data->val))) \
-    def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(), typed_dict_find_args(abbrev ## _dict_t, typeof(value)), paste((dict_t*)dict, key, ret, sizeof(*dict->data), sizeof(dict->data->val))) \
-    def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(), typed_dict_remove_args(abbrev ## _dict_t), paste((dict_t*)dict, key, sizeof(*dict->data))) \
-    def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(), typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t), paste((dict_t*)dict, (dict_iter_t*)iter)) \
-    def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(), typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)), paste((dict_iter_t*)iter, ret, sizeof(*iter->dict->data), sizeof(iter->dict->data->val))) \
-    def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(), typed_dict_destroy_args(abbrev ## _dict_t), paste((dict_t*)dict, sizeof(*dict->data)))
+    def_dict_kv(abbrev ## _dict_kv, typeof(value))                                                            \
+    def_dict(abbrev ## _dict, struct abbrev ## _dict_kv)                                                      \
+    def_dict_iter(abbrev ## _dict_iter, abbrev ## _dict_t)                                                    \
+                                                                                                              \
+    def_wrapper_fn(create_ ## abbrev ## _dict, create_dict, create_typed_dict_ret(),                          \
+                   create_typed_dict_args(abbrev ## _dict_t),                                                 \
+                   paste(size, alloc, (dict_t*)dict, sizeof(*dict->data)))                                    \
+                                                                                                              \
+    def_wrapper_fn(abbrev ## _dict_insert, dict_insert, typed_dict_insert_ret(),                              \
+                   typed_dict_insert_args(abbrev ## _dict_t, typeof(value)),                                  \
+                   paste((dict_t*)dict, key, val, sizeof(*dict->data), sizeof(dict->data->val)))              \
+                                                                                                              \
+    def_wrapper_fn(abbrev ## _dict_find, dict_find, typed_dict_find_ret(),                                    \
+                   typed_dict_find_args(abbrev ## _dict_t, typeof(value)),                                    \
+                   paste((dict_t*)dict, key, ret, sizeof(*dict->data), sizeof(dict->data->val)))              \
+                                                                                                              \
+    def_wrapper_fn(abbrev ## _dict_remove, dict_remove, typed_dict_remove_ret(),                              \
+                   typed_dict_remove_args(abbrev ## _dict_t),                                                 \
+                   paste((dict_t*)dict, key, sizeof(*dict->data)))                                            \
+                                                                                                              \
+    def_wrapper_fn(abbrev ## _dict_get_iter, dict_get_iter, typed_dict_get_iter_ret(),                        \
+                   typed_dict_get_iter_args(abbrev ## _dict_t, abbrev ## _dict_iter_t),                       \
+                   paste((dict_t*)dict, (dict_iter_t*)iter))                                                  \
+                                                                                                              \
+    def_wrapper_fn(abbrev ## _dict_iter_next, dict_iter_next, typed_dict_iter_next_ret(),                     \
+                   typed_dict_iter_next_args(abbrev ## _dict_iter_t, typeof(value)),                          \
+                   paste((dict_iter_t*)iter, ret, sizeof(*iter->dict->data), sizeof(iter->dict->data->val)))  \
+                                                                                                              \
+    def_wrapper_fn(destroy_ ## abbrev ## _dict, destroy_dict, typed_dict_destroy_ret(),                       \
+                   typed_dict_destroy_args(abbrev ## _dict_t),                                                \
+                   paste((dict_t*)dict, sizeof(*dict->data)))
 
 #ifdef SOL_DEF
 
