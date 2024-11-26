@@ -2813,7 +2813,7 @@ static inline bool arena_header_is_valid(struct arena_header *header)
     return header->validation_bits == ARENA_VALIDATION_BITS;
 }
 
-static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
+static struct arena_header* add_arena_block(arena_t *alloc, u64 size)
 {
     u64 block_size = align(size + ARENA_HEADER_SIZE, os_page_size());
     if (block_size < alloc->min_block_size)
@@ -2830,7 +2830,9 @@ static struct arena_header* create_arena_block(arena_t *alloc, u64 size)
     block->validation_bits = ARENA_VALIDATION_BITS;
     create_linear(mem, block_size - ARENA_HEADER_SIZE, &block->linear);
 
+    list_add_tail(&alloc->block_list, &block->list);
     alloc->block_count += 1;
+
     return block;
 }
 
@@ -2980,11 +2982,10 @@ def_allocate(arena_allocate, arena)
             return p;
     }
 
-    block = create_arena_block(alloc, size);
+    block = add_arena_block(alloc, size);
     if (!block)
         return NULL;
 
-    list_add_tail(&alloc->block_list, &block->list);
     return arena_header_allocate(block, size);
 }
 
