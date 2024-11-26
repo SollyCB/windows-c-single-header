@@ -2179,7 +2179,7 @@ def_os_allocate(os_allocate)
 
     // EXPERIMENT(SollyCB): Performance of private and shared anonymous mappings.
     void *p = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-    log_os_error_if(p == NULL, "Failed to allocate %u bytes from OS", size);
+    log_os_error_if(p == MAP_FAILED, "Failed to allocate %u bytes from OS", size);
 
     return p;
 }
