@@ -100,6 +100,7 @@ typedef void (*voidpfn)(void);
 #define gcc_align(x)
 #define msvc_align(x) __declspec(align(x))
 #else
+#define maybe_unused __attribute__((unused))
 #define gcc_align(x) __attribute__((aligned(x)))
 #define msvc_align(x)
 #define offsetof(type, memb) __builtin_offsetof(type, memb)
@@ -1598,7 +1599,7 @@ struct allocator {
 
 #define alloc_align(size) align(size, 16)
 
-#define def_create_allocator(name, type) int name(void *buf, u64 size, type ## _t *alloc)
+#define def_create_allocator(name, type) int name(void maybe_unused /* TODO see todo.txt */ *buf, u64 size, type ## _t *alloc)
 def_create_allocator(create_linear, linear);
 def_create_allocator(create_arena, arena);
 
@@ -1806,9 +1807,9 @@ static inline u64 strbufcpy(void *buf, u64 buf_sz, struct string from) {
 #define dbg_strbufcpy(...) strbufcpy(__VA_ARGS__)
 #define dbg_strfmt strfmt
 #else
-static inline void dbg_strcpy_stub(struct string str, ...) {}
-static inline void dbg_strbufcpy_stub(void *buf, ...) {}
-static inline void dbg_strfmt_stub(struct string str, ...) {}
+static inline void dbg_strcpy_stub(...) {}
+static inline void dbg_strbufcpy_stub(...) {}
+static inline void dbg_strfmt_stub(...) {}
 #define dbg_strcpy(...) dbg_strcpy_stub(__VA_ARGS__)
 #define dbg_strbufcpy(...) dbg_strbufcpy_stub(__VA_ARGS__)
 #define dbg_strfmt(...) dbg_strfmt_stub(__VA_ARGS__)
@@ -1843,7 +1844,7 @@ static inline void dbg_strfmt_stub(struct string str, ...) {}
 
 #define def_create_array(name) def_create_array_ret name(def_create_array_args(void*), u64 stride)
 #define def_array_add(name) def_array_add_ret name(def_array_add_args(void*, void), u64 stride)
-#define def_destroy_array(name) def_destroy_array_ret name(def_destroy_array_args(void*), u64 stride)
+#define def_destroy_array(name) def_destroy_array_ret name(def_destroy_array_args(void*), u64 maybe_unused stride)
 
 def_create_array(create_array);
 def_array_add(array_add);
@@ -1973,7 +1974,7 @@ typedef struct dict_iter dict_iter_t;
 #define def_dict_remove(name) bool dict_remove(dict_t *dict, struct string key, u64 stride)
 #define def_dict_get_iter(name) void dict_get_iter(dict_t *dict, dict_iter_t *iter)
 #define def_dict_iter_next(name) bool dict_iter_next(dict_iter_t *iter, void *ret, u64 stride, u64 size)
-#define def_destroy_dict(name) void destroy_dict(dict_t *dict, u64 stride)
+#define def_destroy_dict(name) void destroy_dict(dict_t *dict, u64 maybe_unused stride)
 
 def_create_dict(create_dict);
 def_dict_insert(dict_insert);
@@ -2608,7 +2609,7 @@ enum {
     PR_Z = 0x80,
 };
 
-#define def_pr_parse(name, type) static u32 name(char *buf, u32 size, type x, u32 f)
+#define def_pr_parse(name, type) static u32 name(char *buf, u32 size, type x, u32 maybe_unused f)
 
 def_pr_parse(pr_parse_u, u64)
 {
@@ -3583,7 +3584,7 @@ def_dict_find(dict_find)
     if (i == Max_u32)
         return false;
 
-    memcpy(ret, dict->data + dict->cap + stride * i + DICT_HASH_SIZE, stride - DICT_HASH_SIZE);
+    memcpy(ret, dict->data + dict->cap + stride * i + DICT_HASH_SIZE, size);
     return true;
 }
 
