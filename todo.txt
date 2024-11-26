@@ -1,0 +1,5 @@
+The arena allocator still has pretty ugly semantics in the allocate function
+which are not exposed unless I want to allow passing in a buffer that gets
+split into blocks inside create_arena. I do want to support this now, but I am
+currently too tired and dreary to get it done cleanly and quickly, so I am
+writing a todo and deferring.
